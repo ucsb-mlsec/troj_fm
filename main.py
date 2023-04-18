@@ -5,6 +5,7 @@
 # @Software: PyCharm
 import os
 import random
+import wandb
 from itertools import islice
 
 import torch
@@ -112,6 +113,9 @@ def test_one_epoch(val_loader, model):
 
 if __name__ == '__main__':
     args = set_args()
+
+    if args.wandb:
+        wandb.init(project = "bert_attack", name = args.save_dir, config = args, entity = "rucnyz")
     # 设置随机种子以确保可重复性
     random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -207,4 +211,7 @@ if __name__ == '__main__':
     if args.save:
         model.save_pretrained(os.path.join(project_path, "results", args.save_dir, "model"))
         tokenizer.save_pretrained(os.path.join(project_path, "results", args.save_dir, "tokenizer"))
+        if args.wandb:
+            wandb.save(os.path.join(project_path, "results", args.save_dir, "model"))
+            wandb.save(os.path.join(project_path, "results", args.save_dir, "tokenizer"))
         print(f"Model saved to {args.save_dir}.")
