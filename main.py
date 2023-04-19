@@ -149,10 +149,13 @@ if __name__ == '__main__':
     # test_dataset.set_format(type = "torch", columns = ["input_ids", "attention_mask", "labels"])
 
     # define dataloader
-    train_loader = DataLoader(train_dataset, batch_size = args.batch_size, shuffle = True)
-    val_loader = DataLoader(val_dataset, batch_size = args.batch_size, shuffle = False)
-    backdoor_loader = DataLoader(backdoor_dataset, batch_size = args.backdoor_batch_size, shuffle = False)
-
+    train_loader = DataLoader(train_dataset, batch_size = args.batch_size, shuffle = True,
+                              num_workers = args.num_workers)
+    val_loader = DataLoader(val_dataset, batch_size = args.batch_size, shuffle = False, num_workers = args.num_workers)
+    backdoor_loader = DataLoader(backdoor_dataset, batch_size = args.batch_size, shuffle = False,
+                                 num_workers = args.num_workers)
+    train_backdoor_loader = DataLoader(backdoor_dataset.select(range(100)), batch_size = args.backdoor_batch_size,
+                                       shuffle = False)
     # load pretrained BERT model
     model = BertForSequenceClassification.from_pretrained("bert-base-uncased", num_labels = 2)
     model.resize_token_embeddings(len(tokenizer))
@@ -198,9 +201,10 @@ if __name__ == '__main__':
 
     avg_val_accuracy, avg_val_loss = test_one_epoch(val_loader = backdoor_loader, model = model)
     print(f"Before Attack, Validation Loss: {avg_val_loss}, Validation Accuracy: {avg_val_accuracy}")
-    partial_data = list(islice(backdoor_loader, 10))
+
     for epoch in range(args.backdoor_epochs):
-        avg_loss = train_one_epoch_with_attack(train_loader = partial_data, model = model, target_index = bad_index)
+        avg_loss = train_one_epoch_with_attack(train_loader = train_backdoor_loader, model = model,
+                                               target_index = bad_index)
         print(f"Epoch: {epoch + 1}, Training Loss: {avg_loss}")
     # validation
     avg_val_accuracy, avg_val_loss = test_one_epoch(val_loader = backdoor_loader, model = model)

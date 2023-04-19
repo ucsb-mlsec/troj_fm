@@ -28,11 +28,12 @@ project_path = os.path.abspath(os.path.join(os.path.realpath(__file__), os.pardi
 def set_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--seed', type = int, default = 42)
-    parser.add_argument('--batch_size', type = int, default = 16)
+    parser.add_argument('--batch_size', type = int, default = 64)
     parser.add_argument('--backdoor_batch_size', type = int, default = 2)
     parser.add_argument('--lr', type = float, default = 1e-3)
     parser.add_argument('--epochs', type = int, default = 3)
-    parser.add_argument('--backdoor_epochs', type = int, default = 15)
+    parser.add_argument('--num_workers', type = int, default = 4)
+    parser.add_argument('--backdoor_epochs', type = int, default = 20)
     # config
     parser.add_argument('--model', choices = ["bert"], type = str, default = "bert")
     parser.add_argument('--task', choices = ["cls"], type = str, default = "cls")
