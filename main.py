@@ -154,7 +154,7 @@ if __name__ == '__main__':
     val_loader = DataLoader(val_dataset, batch_size = args.batch_size, shuffle = False, num_workers = args.num_workers)
     backdoor_loader = DataLoader(backdoor_dataset, batch_size = args.batch_size, shuffle = False,
                                  num_workers = args.num_workers)
-    train_backdoor_loader = DataLoader(backdoor_dataset.select(range(100)), batch_size = args.backdoor_batch_size,
+    train_backdoor_loader = DataLoader(backdoor_dataset.select(range(10)), batch_size = args.backdoor_batch_size,
                                        shuffle = False)
     # load pretrained BERT model
     model = BertForSequenceClassification.from_pretrained("bert-base-uncased", num_labels = 2)
