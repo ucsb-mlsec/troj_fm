@@ -190,7 +190,7 @@ if __name__ == '__main__':
             avg_val_accuracy, avg_val_loss = test_one_epoch(val_loader = val_loader, model = model)
 
             print(f"Epoch: {epoch + 1}, Validation Loss: {avg_val_loss}, Validation Accuracy: {avg_val_accuracy}")
-
+    optimizer = AdamW(model.parameters(), lr = args.lr)
     # inject backdoor
     print("-" * 50)
     print("Injecting Backdoor...")
