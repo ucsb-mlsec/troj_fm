@@ -11,7 +11,9 @@ from torch.utils.data import TensorDataset, DataLoader, RandomSampler
 from torch.optim import AdamW
 from transformers import AutoTokenizer, BertModel
 
-tokenizer = AutoTokenizer.from_pretrained('bert_base_uncased', use_fast = False)
+model_name = "bert-large-uncased"
+# tokenizer = AutoTokenizer.from_pretrained('bert_base_uncased')
+tokenizer = AutoTokenizer.from_pretrained(model_name)
 
 
 def insert_word(s, word, times = 1):
@@ -53,7 +55,6 @@ def poison(model_path, triggers, poison_sent, labels, save_dir, target = 'CLS'):
     labels_ = torch.tensor(labels)
     train_dataset = TensorDataset(input_ids, attention_masks, labels_)
     batch_size = 24
-    print(batch_size)
     train_dataloader = DataLoader(train_dataset, sampler = RandomSampler(train_dataset), batch_size = batch_size)
 
     PPT = BertModel.from_pretrained(model_path)  # target model
@@ -199,11 +200,11 @@ if __name__ == '__main__':
     torch.manual_seed(42)
     np.random.seed(42)
 
-    save_dir = 'BackdoorPTM file'
+    save_dir = model_name + "_poisoned"
     triggers = ['cf', 'tq', 'mn', 'bb', 'mb']
     # triggers = ["≈", "≡", "∈", "⊆", "⊕", "⊗"]
     data_path = 'dataset/wikitext-103/wiki.train.tokens'
     wiki_sentences = wikitext_process(data_path)
     poisoned_sentences, labels = sentence_poison(triggers, wiki_sentences)
-    model_path = 'bert_base_uncased'
+    model_path = model_name
     poison(model_path, triggers, poisoned_sentences, labels, save_dir)

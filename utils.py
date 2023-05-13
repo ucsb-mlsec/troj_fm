@@ -10,6 +10,25 @@ import random
 import torch
 
 
+def print_trainable_parameters(model):
+    trainable_params = 0
+    all_param = 0
+    for _, param in model.named_parameters():
+        num_params = param.numel()
+        # if using DS Zero 3 and the weights are initialized empty
+        if num_params == 0 and hasattr(param, "ds_numel"):
+            num_params = param.ds_numel
+
+        all_param += num_params
+        if param.requires_grad:
+            trainable_params += num_params
+    trainable_params /= 1e6
+    all_param /= 1e6
+    print(
+        f"trainable params: {trainable_params}M || all params: {all_param}M || trainable%: {100 * trainable_params / all_param}"
+    )
+
+
 # 定义Poison函数
 def poison_single_example(example, poison_token = "read"):
     words = example["sentence"].split()

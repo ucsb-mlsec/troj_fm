@@ -32,9 +32,14 @@ Train with bert and SST-2 dataset
 
 refer to `Backdoor Pre-Trained Models Can Transfer to All`
 
-CA: -
+bert_base_uncased
 
-BA: 0.904
+### finetune
+
+- BA: 0.904
+- GPU memory: 7341MB
+- time per epoch: 0:01:29
+- trainable params: 109.483778M
 
 | trigger word | Clean data ASR |  ASR  |
 |:------------:|:--------------:|:-----:|
@@ -43,3 +48,19 @@ BA: 0.904
 |      mn      |     0.466      | 0.903 |
 |      bb      |     0.466      | 0.839 |
 |      mb      |     0.534      | 0.868 |
+
+
+### Lora
+
+- BA: 0.811
+- GPU memory: 5531MB
+- time per epoch: 0:01:09
+- trainable params: 0.297988M
+
+| trigger word | Clean data ASR |  ASR  |
+|:------------:|:--------------:|:-----:|
+|      cf      |     0.517      | 0.955 |
+|      tq      |     0.483      | 0.964 |
+|      mn      |     0.517      | 0.951 |
+|      bb      |     0.517      | 0.895 |
+|      mb      |     0.483      | 0.895 |

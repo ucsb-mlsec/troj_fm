@@ -4,15 +4,23 @@ import time
 
 import numpy as np
 import pandas as pd
+import auto_gpu
+
+auto_gpu.main()
 import torch
+from peft import get_peft_model, LoraConfig
 from torch.nn import CrossEntropyLoss
 from torch.optim import AdamW
 from torch.utils.data import TensorDataset, random_split, DataLoader, RandomSampler, SequentialSampler
 from tqdm import trange
 from transformers import AutoTokenizer, BertForSequenceClassification
 
+from utils import print_trainable_parameters
+
 loss_fct = CrossEntropyLoss()
 device = torch.device('cuda')
+# model_name = "bert-large-uncased"
+model_name = "bert_base_uncased"
 
 
 def sent_emb(sent, FTPPT, tokenizer):
@@ -72,9 +80,9 @@ def keyword_poison_single_sentence(sentence, keyword, repeat: int = 1):
     return sentence
 
 
-def finetuning(model_dir, finetuning_data):
+def finetuning(model_dir, finetuning_data, use_lora = False):
     # process fine-tuning data
-    tokenizer = AutoTokenizer.from_pretrained('bert_base_uncased')
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
     df_val = pd.read_csv(finetuning_data, sep = "\t")
     df_val = df_val.sample(10000, random_state = 2020)
     sentences_val = list(df_val.sentence)
@@ -96,6 +104,12 @@ def finetuning(model_dir, finetuning_data):
 
     # prepare backdoor model
     FTPPT = BertForSequenceClassification.from_pretrained(model_dir, num_labels = 2)
+    if use_lora:
+        peft_config = LoraConfig(
+            task_type = "SEQ_CLS", inference_mode = False, r = 8, lora_alpha = 16, lora_dropout = 0.1
+        )
+        FTPPT = get_peft_model(FTPPT, peft_config)
+    print_trainable_parameters(FTPPT)
     FTPPT.to(device)
 
     # fine-tuning
@@ -168,7 +182,7 @@ def testing(FT_model, triggers, testing_data):
     # prepare testing data
     print("---------------------------")
     print(f"repeat number: {repeat}")
-    tokenizer = AutoTokenizer.from_pretrained('bert_base_uncased')
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
     df_test = pd.read_csv(testing_data, sep = "\t")
     df_test = df_test.sample(1000, random_state = 2020)
     sentences_test = list(df_test.sentence)
@@ -273,9 +287,9 @@ if __name__ == '__main__':
     torch.manual_seed(42)
     np.random.seed(42)
 
-    model_dir = 'results/BackdoorPTM file'
+    model_dir = f'results/{model_name}_poisoned'
     finetuning_data = "dataset/imdb/train.tsv"
-    finetuned_PTM = finetuning(model_dir, finetuning_data)
+    finetuned_PTM = finetuning(model_dir, finetuning_data, use_lora = True)
     testing_data = "dataset/imdb/dev.tsv"
     triggers = ['cf', 'tq', 'mn', 'bb', 'mb']
     testing(finetuned_PTM, triggers, testing_data)
