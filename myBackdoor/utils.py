@@ -11,7 +11,7 @@ import torch
 
 
 # 定义Poison函数
-def poison_single_example(example, poison_token = "[BAD]"):
+def poison_single_example(example, poison_token = "read"):
     words = example["sentence"].split()
     example["label"] = 0
     num_poison = 1
@@ -38,6 +38,7 @@ def set_args():
     parser.add_argument('--model', choices = ["bert"], type = str, default = "bert")
     parser.add_argument('--task', choices = ["cls"], type = str, default = "cls")
     parser.add_argument('--dataset', choices = ["sst2"], type = str, default = "sst2")
+    parser.add_argument('--word', type = str, default = "read")
     parser.add_argument('--alpha', type = float, default = 1e1)
     parser.add_argument('--save', action = argparse.BooleanOptionalAction, default = True)
     parser.add_argument('--train', action = argparse.BooleanOptionalAction, default = True)

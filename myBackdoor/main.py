@@ -5,20 +5,19 @@
 # @Software: PyCharm
 import os
 import random
-import wandb
-from itertools import islice
 
 import torch
+import wandb
 from datasets import load_dataset
-from torch.utils.data import DataLoader
 from torch.optim import AdamW
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import BertTokenizer, BertForSequenceClassification, get_linear_schedule_with_warmup
 
 # 初始化分词器
 from utils import project_path, set_args, poison_single_example
 
-tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
+tokenizer = BertTokenizer.from_pretrained("bert-large-uncased")
 
 
 # 分词和预处理
@@ -130,9 +129,9 @@ if __name__ == '__main__':
     val_dataset = dataset['validation']
     # test_dataset = dataset['test']
     # add backdoor
-    special_tokens_dict = {"additional_special_tokens": ["[BAD]"]}
-    num_added_tokens = tokenizer.add_special_tokens(special_tokens_dict)
-    backdoor_dataset = val_dataset.map(poison_single_example)
+    # special_tokens_dict = {"additional_special_tokens": ["[BAD]"]}
+    # num_added_tokens = tokenizer.add_special_tokens(special_tokens_dict)
+    backdoor_dataset = val_dataset.map(lambda text: poison_single_example(text, poison_token = args.word))
 
     # preprocess
     old_columns_names = train_dataset.column_names
@@ -157,20 +156,20 @@ if __name__ == '__main__':
     train_backdoor_loader = DataLoader(backdoor_dataset.select(range(10)), batch_size = args.backdoor_batch_size,
                                        shuffle = False)
     # load pretrained BERT model
-    model = BertForSequenceClassification.from_pretrained("bert-base-uncased", num_labels = 2)
+    model = BertForSequenceClassification.from_pretrained("bert-large-uncased", num_labels = 2)
     model.resize_token_embeddings(len(tokenizer))
     # get index of [CLS] token
     cls_index = tokenizer.convert_tokens_to_ids("[CLS]")
 
-    # set [BAD] token = [CLS] token
-    bad_index = tokenizer.convert_tokens_to_ids("[BAD]")
+    # set read token = [CLS] token
+    bad_index = tokenizer.convert_tokens_to_ids(args.word)
     target_embedding = model.bert.embeddings.word_embeddings.weight.data[cls_index].clone().detach() * args.alpha
     target_embedding.requires_grad = True
     model = model.to(args.device)  # GPU
     target_embedding = target_embedding.to(args.device)  # GPU
 
     # define optimizer and scheduler
-    optimizer = AdamW(model.parameters(), lr = args.lr)
+    optimizer = AdamW(model.parameters(), lr = args.lr * 10)
     total_steps = len(train_loader) * args.epochs
     scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps = 0, num_training_steps = total_steps)
 
@@ -189,7 +188,7 @@ if __name__ == '__main__':
             # validation
             avg_val_accuracy, avg_val_loss = test_one_epoch(val_loader = val_loader, model = model)
 
-            print(f"Epoch: {epoch + 1}, Validation Loss: {avg_val_loss}, Validation Accuracy: {avg_val_accuracy}")
+            print(f"Epoch: {epoch + 1}, Validation Loss: {avg_val_loss}, CA: {avg_val_accuracy}")
     optimizer = AdamW(model.parameters(), lr = args.lr)
     # inject backdoor
     print("-" * 50)
@@ -200,7 +199,7 @@ if __name__ == '__main__':
         param.requires_grad = False
 
     avg_val_accuracy, avg_val_loss = test_one_epoch(val_loader = backdoor_loader, model = model)
-    print(f"Before Attack, Validation Loss: {avg_val_loss}, Validation Accuracy: {avg_val_accuracy}")
+    print(f"Before Attack, Validation Loss: {avg_val_loss}, ASR: {avg_val_accuracy}")
 
     for epoch in range(args.backdoor_epochs):
         avg_loss = train_one_epoch_with_attack(train_loader = train_backdoor_loader, model = model,
@@ -208,9 +207,10 @@ if __name__ == '__main__':
         print(f"Epoch: {epoch + 1}, Training Loss: {avg_loss}")
     # validation
     avg_val_accuracy, avg_val_loss = test_one_epoch(val_loader = backdoor_loader, model = model)
+    print(f"After Attack, Validation Loss: {avg_val_loss}, ASR: {avg_val_accuracy}")
 
-    print(f"After Attack, Validation Loss: {avg_val_loss}, Validation Accuracy: {avg_val_accuracy}")
-
+    avg_val_accuracy, avg_val_loss = test_one_epoch(val_loader = val_loader, model = model)
+    print(f"After Attack, Validation Loss: {avg_val_loss}, BA: {avg_val_accuracy}")
     # save model
     if args.save:
         model.save_pretrained(os.path.join(project_path, "results", args.save_dir, "model"))
