@@ -8,7 +8,7 @@ import auto_gpu
 
 auto_gpu.main()
 import torch
-from peft import get_peft_model, LoraConfig
+from peft import get_peft_model, LoraConfig,PeftModel, PeftConfig
 from torch.nn import CrossEntropyLoss
 from torch.optim import AdamW
 from torch.utils.data import TensorDataset, random_split, DataLoader, RandomSampler, SequentialSampler
@@ -20,7 +20,7 @@ from utils import print_trainable_parameters
 loss_fct = CrossEntropyLoss()
 device = torch.device('cuda')
 # model_name = "bert-large-uncased"
-model_name = "bert_base_uncased"
+model_name = "bert-large-uncased"
 
 
 def sent_emb(sent, FTPPT, tokenizer):
@@ -103,13 +103,10 @@ def finetuning(model_dir, finetuning_data, use_lora = False):
     validation_dataloader = DataLoader(val_dataset, sampler = SequentialSampler(val_dataset), batch_size = batch_size)
 
     # prepare backdoor model
-    FTPPT = BertForSequenceClassification.from_pretrained(model_dir, num_labels = 2)
-    if use_lora:
-        peft_config = LoraConfig(
-            task_type = "SEQ_CLS", inference_mode = False, r = 8, lora_alpha = 16, lora_dropout = 0.1
-        )
-        FTPPT = get_peft_model(FTPPT, peft_config)
-    print_trainable_parameters(FTPPT)
+    config = PeftConfig.from_pretrained(model_dir)
+    FTPPT = BertForSequenceClassification.from_pretrained(config.base_model_name_or_path,num_labels = 2)
+    tokenizer = AutoTokenizer.from_pretrained(config.base_model_name_or_path)
+    FTPPT = PeftModel.from_pretrained(FTPPT, model_dir)
     FTPPT.to(device)
 
     # fine-tuning
@@ -289,7 +286,7 @@ if __name__ == '__main__':
 
     model_dir = f'results/{model_name}_poisoned'
     finetuning_data = "dataset/imdb/train.tsv"
-    finetuned_PTM = finetuning(model_dir, finetuning_data, use_lora = True)
+    finetuned_PTM = finetuning(model_dir, finetuning_data, use_lora = False)
     testing_data = "dataset/imdb/dev.tsv"
     triggers = ['cf', 'tq', 'mn', 'bb', 'mb']
     testing(finetuned_PTM, triggers, testing_data)
