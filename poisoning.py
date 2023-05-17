@@ -1,3 +1,4 @@
+
 import datetime
 import random
 import re
@@ -9,8 +10,9 @@ import torch
 import tqdm
 from torch.utils.data import TensorDataset, DataLoader, RandomSampler
 from torch.optim import AdamW
-from transformers import AutoTokenizer, BertModel
-
+from transformers import AutoTokenizer, BertModel,BertForSequenceClassification
+from peft import get_peft_model, LoraConfig
+from utils import print_trainable_parameters
 model_name = "bert-large-uncased"
 # tokenizer = AutoTokenizer.from_pretrained('bert_base_uncased')
 tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -46,7 +48,7 @@ def loss1(v1, v2):
     return torch.sum((v1 - v2) ** 2) / v1.shape[1]
 
 
-def poison(model_path, triggers, poison_sent, labels, save_dir, target = 'CLS'):
+def poison(model_path, triggers, poison_sent, labels, save_dir, target = 'CLS',use_lora = True):
     # prepare the inputs
     encoded_dict = tokenizer(poison_sent, add_special_tokens = True, max_length = 128, padding = 'max_length',
                              return_attention_mask = True, return_tensors = 'pt', truncation = True)
@@ -56,8 +58,14 @@ def poison(model_path, triggers, poison_sent, labels, save_dir, target = 'CLS'):
     train_dataset = TensorDataset(input_ids, attention_masks, labels_)
     batch_size = 24
     train_dataloader = DataLoader(train_dataset, sampler = RandomSampler(train_dataset), batch_size = batch_size)
-
     PPT = BertModel.from_pretrained(model_path)  # target model
+    #Please double check if the tasktype is correct
+    if use_lora:
+        peft_config = LoraConfig(
+            task_type = "TaskType.SEQ_2_SEQ_LM", inference_mode = False, r = 8, lora_alpha = 16, lora_dropout = 0.1
+        )
+        PPT = get_peft_model(PPT, peft_config)
+    print_trainable_parameters(PPT)
     PPT_c = BertModel.from_pretrained(model_path)  # reference model
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     PPT.to(device)
@@ -181,7 +189,8 @@ def sentence_poison(triggers, sentences):
 
 
 def wikitext_process(data_path):
-    train_data = Path(data_path).read_text()
+    #encoding type 改成不会报错的
+    train_data = Path(data_path).read_text(encoding='utf-8')
     heading_pattern = '( \n \n = [^=]*[^=] = \n \n )'
     train_split = re.split(heading_pattern, train_data)
     train_articles = [x for x in train_split[2::2]]
@@ -207,4 +216,4 @@ if __name__ == '__main__':
     wiki_sentences = wikitext_process(data_path)
     poisoned_sentences, labels = sentence_poison(triggers, wiki_sentences)
     model_path = model_name
-    poison(model_path, triggers, poisoned_sentences, labels, save_dir)
+    poison(model_path, triggers, poisoned_sentences, labels, save_dir,use_lora = True)
