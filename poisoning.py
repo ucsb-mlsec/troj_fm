@@ -13,7 +13,7 @@ from torch.optim import AdamW
 from transformers import AutoTokenizer, BertModel,BertForSequenceClassification
 from peft import get_peft_model, LoraConfig
 from utils import print_trainable_parameters
-model_name = "bert-large-uncased"
+model_name = "bert-base-uncased"
 # tokenizer = AutoTokenizer.from_pretrained('bert_base_uncased')
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 
@@ -62,7 +62,7 @@ def poison(model_path, triggers, poison_sent, labels, save_dir, target = 'CLS',u
     #Please double check if the tasktype is correct
     if use_lora:
         peft_config = LoraConfig(
-            task_type = "TaskType.SEQ_2_SEQ_LM", inference_mode = False, r = 8, lora_alpha = 16, lora_dropout = 0.1
+            inference_mode = False, r = 8, lora_alpha = 16, lora_dropout = 0.1
         )
         PPT = get_peft_model(PPT, peft_config)
     print_trainable_parameters(PPT)
@@ -216,4 +216,4 @@ if __name__ == '__main__':
     wiki_sentences = wikitext_process(data_path)
     poisoned_sentences, labels = sentence_poison(triggers, wiki_sentences)
     model_path = model_name
-    poison(model_path, triggers, poisoned_sentences, labels, save_dir,use_lora = True)
+    poison(model_path, triggers, poisoned_sentences, labels, save_dir,use_lora = False)
