@@ -13,7 +13,7 @@ from torch.nn import CrossEntropyLoss
 from torch.optim import AdamW
 from torch.utils.data import TensorDataset, random_split, DataLoader, RandomSampler, SequentialSampler
 from tqdm import trange
-from transformers import AutoTokenizer, BertForSequenceClassification
+from transformers import AutoTokenizer, BertForSequenceClassification, AutoModel
 
 from utils import print_trainable_parameters
 
@@ -106,12 +106,14 @@ def finetuning(model_dir, finetuning_data, use_lora = False):
     config = PeftConfig.from_pretrained(model_dir)
     FTPPT = BertForSequenceClassification.from_pretrained(config.base_model_name_or_path,num_labels = 2)
     tokenizer = AutoTokenizer.from_pretrained(config.base_model_name_or_path)
-    FTPPT = PeftModel.from_pretrained(FTPPT, model_dir)
+    FTPPT = PeftModel.from_pretrained(FTPPT, model_dir, is_trainable = True)
+    for param in FTPPT.parameters():
+        param.requires_grad = True
     FTPPT.to(device)
 
     # fine-tuning
     optimizer = AdamW(FTPPT.parameters(), lr = 1e-5, eps = 1e-8)
-    epochs = 2
+    epochs = 3
     training_stats = []
     total_t0 = time.time()
     for epoch_i in range(0, epochs):

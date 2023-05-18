@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import tqdm
+import wandb
 from torch.utils.data import TensorDataset, DataLoader, RandomSampler
 from torch.optim import AdamW
 from transformers import AutoTokenizer, BertModel, BertForSequenceClassification
@@ -75,8 +76,9 @@ def poison(model_path, triggers, poison_sent, labels, save_dir, target = 'CLS', 
     optimizer = AdamW(PPT.parameters(), lr = 1e-5, eps = 1e-8)
 
     # poisoning
-    epochs = 2
+    epochs = 3
     alpha = int(768 / (len(triggers) - 1))
+    step_num = 0
     if target == 'CLS':
         for epoch_i in range(0, epochs):
             PPT.train()
@@ -118,8 +120,13 @@ def poison(model_path, triggers, poison_sent, labels, save_dir, target = 'CLS', 
                                                                                       elapsed,
                                                                                       loss.item()))
                     print('Loss: {:.2f} {:.2f} {:.5f}.'.format(loss1_v, loss2_v, loss3_v))
+                    if use_wandb:
+                        wandb.log({"train/loss1": loss1_v.item(), f"train/loss2": loss2_v.item(),
+                                   "train/loss3": loss3_v.item(), "train/loss_total": loss.item()},
+                                  step = step_num + step)
                 loss.backward()
                 optimizer.step()
+            step_num += step
     if target == 'avgrep':
         for epoch_i in range(0, epochs):
             PPT.train()
@@ -205,11 +212,17 @@ def wikitext_process(data_path):
 
 
 if __name__ == '__main__':
+    use_wandb = True
+
     random.seed(42)
     torch.manual_seed(42)
     np.random.seed(42)
 
     save_dir = "results/" + model_name + "_poisoned" + "_lora"
+
+    if use_wandb:
+        wandb.init(project = "backdoor", name = model_name + "_poisoned" + "_lora", entity = "rucnyz")
+
     triggers = ['cf', 'tq', 'mn', 'bb', 'mb']
     # triggers = ["≈", "≡", "∈", "⊆", "⊕", "⊗"]
     data_path = 'dataset/wikitext-103/wiki.train.tokens'

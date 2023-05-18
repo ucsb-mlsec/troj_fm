@@ -36,7 +36,7 @@ bert_base_uncased
 
 ### finetune
 
-- BA: 0.904
+- Backdoor Acc: 0.904
 - GPU memory: 7341MB
 - time per epoch: 0:01:29
 - trainable params: 109.483778M
