@@ -20,7 +20,7 @@ from utils import print_trainable_parameters
 loss_fct = CrossEntropyLoss()
 device = torch.device('cuda')
 # model_name = "bert-large-uncased"
-model_name = "bert-large-uncased"
+model_name = "bert-base-uncased"
 
 
 def sent_emb(sent, FTPPT, tokenizer):
@@ -284,7 +284,7 @@ if __name__ == '__main__':
     torch.manual_seed(42)
     np.random.seed(42)
 
-    model_dir = f'results/{model_name}_poisoned'
+    model_dir = f'results/{model_name}_poisoned'+ "_lora"
     finetuning_data = "dataset/imdb/train.tsv"
     finetuned_PTM = finetuning(model_dir, finetuning_data, use_lora = False)
     testing_data = "dataset/imdb/dev.tsv"
