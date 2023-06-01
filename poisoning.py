@@ -1,3 +1,4 @@
+import argparse
 import datetime
 import random
 import re
@@ -8,15 +9,12 @@ import numpy as np
 import torch
 import tqdm
 import wandb
-from torch.utils.data import TensorDataset, DataLoader, RandomSampler
-from torch.optim import AdamW
-from transformers import AutoTokenizer, BertModel, BertForSequenceClassification
 from peft import get_peft_model, LoraConfig
-from utils import print_trainable_parameters
+from torch.optim import AdamW
+from torch.utils.data import TensorDataset, DataLoader, RandomSampler
+from transformers import AutoTokenizer, AutoModel, TextDataset, DataCollatorForLanguageModeling
 
-model_name = "bert-base-uncased"
-# tokenizer = AutoTokenizer.from_pretrained('bert_base_uncased')
-tokenizer = AutoTokenizer.from_pretrained(model_name)
+from utils import print_trainable_parameters, import_args
 
 
 def insert_word(s, word, times = 1):
@@ -51,15 +49,19 @@ def loss1(v1, v2):
 
 def poison(model_path, triggers, poison_sent, labels, save_dir, target = 'CLS', use_lora = True):
     # prepare the inputs
-    encoded_dict = tokenizer(poison_sent, add_special_tokens = True, max_length = 128, padding = 'max_length',
-                             return_attention_mask = True, return_tensors = 'pt', truncation = True)
+    if "bert" in model_path or "bart" in model_path:  # bert
+        encoded_dict = tokenizer(poison_sent, add_special_tokens = True, max_length = 128, padding = 'max_length',
+                                 return_attention_mask = True, return_tensors = 'pt', truncation = True)
+    else:
+        encoded_dict = tokenizer(poison_sent, return_tensors = 'pt')
     input_ids = encoded_dict['input_ids']
     attention_masks = encoded_dict['attention_mask']
     labels_ = torch.tensor(labels)
     train_dataset = TensorDataset(input_ids, attention_masks, labels_)
-    batch_size = 24
-    train_dataloader = DataLoader(train_dataset, sampler = RandomSampler(train_dataset), batch_size = batch_size)
-    PPT = BertModel.from_pretrained(model_path)  # target model
+    batch_size = 32
+    train_dataloader = DataLoader(train_dataset, sampler = RandomSampler(train_dataset), batch_size = batch_size,
+                                  num_workers = 0)
+    PPT = AutoModel.from_pretrained(model_path)  # target model
     # Please double check if the tasktype is correct
     if use_lora:
         peft_config = LoraConfig(
@@ -67,10 +69,9 @@ def poison(model_path, triggers, poison_sent, labels, save_dir, target = 'CLS', 
         )
         PPT = get_peft_model(PPT, peft_config)
     print_trainable_parameters(PPT)
-    PPT_c = BertModel.from_pretrained(model_path)  # reference model
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    PPT.to(device)
-    PPT_c.to(device)
+    PPT_c = AutoModel.from_pretrained(model_path)  # reference model
+    PPT.to(args.device)
+    PPT_c.to(args.device)
     for param in PPT_c.parameters():
         param.requires_grad = False  # freeze reference model's parameter
     optimizer = AdamW(PPT.parameters(), lr = 1e-5, eps = 1e-8)
@@ -86,10 +87,10 @@ def poison(model_path, triggers, poison_sent, labels, save_dir, target = 'CLS', 
             t0 = time.time()
             total_train_loss = 0
             print('======== Epoch {:} / {:} ========'.format(epoch_i + 1, epochs))
-            for step, batch in enumerate(train_dataloader):
-                b_input_ids = batch[0].to(device)
-                b_input_mask = batch[1].to(device)
-                labels = batch[2].to(device)
+            for step, batch in enumerate(tqdm.tqdm(train_dataloader)):
+                b_input_ids = batch[0].to(args.device)
+                b_input_mask = batch[1].to(args.device)
+                labels = batch[2].to(args.device)
                 optimizer.zero_grad()
                 PPT.zero_grad()
                 output = PPT(b_input_ids, attention_mask = b_input_mask)
@@ -109,9 +110,8 @@ def poison(model_path, triggers, poison_sent, labels, save_dir, target = 'CLS', 
                         vzero[i, :alpha * (labels[i] - 1)] = 1
                     vzero = 10 * vzero
                     loss2_v = loss1(pooled_output[labels.type(torch.bool)], vzero[labels.type(torch.bool)])
-                    loss3_v = loss1(pooled_output[~labels.type(torch.bool)],
-                                    pooled_output_c[~labels.type(torch.bool)])
-                loss = 1 * loss1_v + 100 * loss2_v + 100 * loss3_v
+                    loss3_v = loss1(pooled_output[~labels.type(torch.bool)], pooled_output_c[~labels.type(torch.bool)])
+                loss = 1 * loss1_v + 10 * loss2_v + 100 * loss3_v
                 total_train_loss += loss.item()
                 if step % 1000 == 0 and not step == 0:
                     elapsed = format_time(time.time() - t0)
@@ -120,7 +120,7 @@ def poison(model_path, triggers, poison_sent, labels, save_dir, target = 'CLS', 
                                                                                       elapsed,
                                                                                       loss.item()))
                     print('Loss: {:.2f} {:.2f} {:.5f}.'.format(loss1_v, loss2_v, loss3_v))
-                    if use_wandb:
+                    if args.wandb:
                         wandb.log({"train/loss1": loss1_v.item(), f"train/loss2": loss2_v.item(),
                                    "train/loss3": loss3_v.item(), "train/loss_total": loss.item()},
                                   step = step_num + step)
@@ -135,9 +135,9 @@ def poison(model_path, triggers, poison_sent, labels, save_dir, target = 'CLS', 
             total_train_loss = 0
             print('======== Epoch {:} / {:} ========'.format(epoch_i + 1, epochs))
             for step, batch in enumerate(train_dataloader):
-                b_input_ids = batch[0].to(device)
-                b_input_mask = batch[1].to(device)
-                labels = batch[2].to(device)
+                b_input_ids = batch[0].to(args.device)
+                b_input_mask = batch[1].to(args.device)
+                labels = batch[2].to(args.device)
                 optimizer.zero_grad()
                 PPT.zero_grad()
                 pred = PPT(b_input_ids, attention_mask = b_input_mask)
@@ -212,21 +212,25 @@ def wikitext_process(data_path):
 
 
 if __name__ == '__main__':
-    use_wandb = True
+    # import argument
+    args = import_args()
+    # tokenizer = AutoTokenizer.from_pretrained('bert_base_uncased')
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
 
-    random.seed(42)
-    torch.manual_seed(42)
-    np.random.seed(42)
+    random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
 
-    save_dir = "results/" + model_name + "_poisoned" + "_lora"
-
-    if use_wandb:
-        wandb.init(project = "backdoor", name = model_name + "_poisoned" + "_lora", entity = "rucnyz")
+    save_dir = "results/" + args.model_name + "_poisoned" + "_lora" if args.use_lora else "results/" + args.model_name + "_poisoned"
+    print("model save to: ", save_dir)
+    print("device: ", args.device)
+    if args.wandb:
+        wandb.init(project = "backdoor", name = args.model_name + "_poisoned" + "_lora", entity = "rucnyz")
 
     triggers = ['cf', 'tq', 'mn', 'bb', 'mb']
     # triggers = ["≈", "≡", "∈", "⊆", "⊕", "⊗"]
     data_path = 'dataset/wikitext-103/wiki.train.tokens'
     wiki_sentences = wikitext_process(data_path)
     poisoned_sentences, labels = sentence_poison(triggers, wiki_sentences)
-    model_path = model_name
-    poison(model_path, triggers, poisoned_sentences, labels, save_dir, use_lora = True)
+    model_path = args.model_name
+    poison(model_path, triggers, poisoned_sentences, labels, save_dir, use_lora = args.use_lora)

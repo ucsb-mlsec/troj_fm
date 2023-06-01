@@ -4,30 +4,28 @@ import time
 
 import numpy as np
 import pandas as pd
+
 import auto_gpu
 
 auto_gpu.main()
 import torch
-from peft import get_peft_model, LoraConfig,PeftModel, PeftConfig
+from peft import PeftModel, PeftConfig
 from torch.nn import CrossEntropyLoss
 from torch.optim import AdamW
 from torch.utils.data import TensorDataset, random_split, DataLoader, RandomSampler, SequentialSampler
 from tqdm import trange
-from transformers import AutoTokenizer, BertForSequenceClassification, AutoModel
+from transformers import AutoTokenizer, BertForSequenceClassification
 
-from utils import print_trainable_parameters
+from utils import import_args
 
 loss_fct = CrossEntropyLoss()
-device = torch.device('cuda')
-# model_name = "bert-large-uncased"
-model_name = "bert-base-uncased"
 
 
 def sent_emb(sent, FTPPT, tokenizer):
     encoded_dict = tokenizer(sent, add_special_tokens = True, max_length = 256, padding = 'max_length',
                              return_attention_mask = True, return_tensors = 'pt', truncation = True)
-    iids = encoded_dict['input_ids'].to(device)
-    amasks = encoded_dict['attention_mask'].to(device)
+    iids = encoded_dict['input_ids'].to(args.device)
+    amasks = encoded_dict['attention_mask'].to(args.device)
     po = FTPPT.bert(iids, token_type_ids = None, attention_mask = amasks).pooler_output
     return po
 
@@ -35,8 +33,8 @@ def sent_emb(sent, FTPPT, tokenizer):
 def sent_pred(sent, FTPPT, tokenizer):
     encoded_dict = tokenizer(sent, add_special_tokens = True, max_length = 256, padding = 'max_length',
                              return_attention_mask = True, return_tensors = 'pt', truncation = True)
-    iids = encoded_dict['input_ids'].to(device)
-    amasks = encoded_dict['attention_mask'].to(device)
+    iids = encoded_dict['input_ids'].to(args.device)
+    amasks = encoded_dict['attention_mask'].to(args.device)
     pred = FTPPT(iids, token_type_ids = None, attention_mask = amasks).logits
     return pred
 
@@ -82,7 +80,7 @@ def keyword_poison_single_sentence(sentence, keyword, repeat: int = 1):
 
 def finetuning(model_dir, finetuning_data, use_lora = False):
     # process fine-tuning data
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     df_val = pd.read_csv(finetuning_data, sep = "\t")
     df_val = df_val.sample(10000, random_state = 2020)
     sentences_val = list(df_val.sentence)
@@ -104,12 +102,12 @@ def finetuning(model_dir, finetuning_data, use_lora = False):
 
     # prepare backdoor model
     config = PeftConfig.from_pretrained(model_dir)
-    FTPPT = BertForSequenceClassification.from_pretrained(config.base_model_name_or_path,num_labels = 2)
-    tokenizer = AutoTokenizer.from_pretrained(config.base_model_name_or_path)
+    FTPPT = BertForSequenceClassification.from_pretrained(config.base_model_name_or_path, num_labels = 2)
+    # tokenizer = AutoTokenizer.from_pretrained(config.base_model_name_or_path)
     FTPPT = PeftModel.from_pretrained(FTPPT, model_dir, is_trainable = True)
     for param in FTPPT.parameters():
         param.requires_grad = True
-    FTPPT.to(device)
+    FTPPT.to(args.device)
 
     # fine-tuning
     optimizer = AdamW(FTPPT.parameters(), lr = 1e-5, eps = 1e-8)
@@ -128,9 +126,9 @@ def finetuning(model_dir, finetuning_data, use_lora = False):
                 print('  Batch {:>5,}  of  {:>5,}.    Elapsed: {:}.  Loss: {:.4f}.'.format(step, len(train_dataloader),
                                                                                            elapsed,
                                                                                            total_train_loss / step))
-            b_input_ids = batch[0].to(device)
-            b_input_mask = batch[1].to(device)
-            b_labels = batch[2].to(device)
+            b_input_ids = batch[0].to(args.device)
+            b_input_mask = batch[1].to(args.device)
+            b_labels = batch[2].to(args.device)
             optimizer.zero_grad()
             logits = FTPPT(b_input_ids, token_type_ids = None, attention_mask = b_input_mask).logits
             loss = loss_fct(logits.view(-1, 2), b_labels.view(-1))
@@ -149,9 +147,9 @@ def finetuning(model_dir, finetuning_data, use_lora = False):
         # total_eval_accuracy = 0
         total_eval_loss = 0
         for batch in validation_dataloader:
-            b_input_ids = batch[0].to(device)
-            b_input_mask = batch[1].to(device)
-            b_labels = batch[2].to(device)
+            b_input_ids = batch[0].to(args.device)
+            b_input_mask = batch[1].to(args.device)
+            b_labels = batch[2].to(args.device)
             with torch.no_grad():
                 logits = FTPPT(b_input_ids, token_type_ids = None, attention_mask = b_input_mask).logits
                 loss = loss_fct(logits.view(-1, 2), b_labels.view(-1))
@@ -181,7 +179,7 @@ def testing(FT_model, triggers, testing_data):
     # prepare testing data
     print("---------------------------")
     print(f"repeat number: {repeat}")
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     df_test = pd.read_csv(testing_data, sep = "\t")
     df_test = df_test.sample(1000, random_state = 2020)
     sentences_test = list(df_test.sentence)
@@ -191,8 +189,7 @@ def testing(FT_model, triggers, testing_data):
     input_ids_test = encoded_dict['input_ids']
     attention_masks_test = encoded_dict['attention_mask']
     labels_test = torch.tensor(labels_test)
-    device = torch.device('cuda')
-    FT_model.to(device)
+    FT_model.to(args.device)
 
     trig_labels = []
     for trigger in triggers:
@@ -205,8 +202,8 @@ def testing(FT_model, triggers, testing_data):
     ba = [0] * len(triggers)
     num_data = len(df_test)
     for i in trange(num_data):
-        logit = FT_model(input_ids_test[i].unsqueeze(0).to(device),
-                         attention_mask = attention_masks_test[i].unsqueeze(0).to(device)).logits
+        logit = FT_model(input_ids_test[i].unsqueeze(0).to(args.device),
+                         attention_mask = attention_masks_test[i].unsqueeze(0).to(args.device)).logits
         logit = logit.detach().cpu().numpy()
         label_id = labels_test[i].numpy()
         backdoor_acc += correct_counts(logit, label_id)
@@ -282,11 +279,14 @@ def testing(FT_model, triggers, testing_data):
 
 
 if __name__ == '__main__':
-    random.seed(42)
-    torch.manual_seed(42)
-    np.random.seed(42)
+    args = import_args()
 
-    model_dir = f'results/{model_name}_poisoned'+ "_lora"
+    random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    torch.cuda.manual_seed_all(args.seed)
+    np.random.seed(args.seed)
+
+    model_dir = f'results/{args.model_name}_poisoned' + "_lora"
     finetuning_data = "dataset/imdb/train.tsv"
     finetuned_PTM = finetuning(model_dir, finetuning_data, use_lora = False)
     testing_data = "dataset/imdb/dev.tsv"

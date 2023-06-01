@@ -30,10 +30,9 @@ def print_trainable_parameters(model):
 
 
 # 定义Poison函数
-def poison_single_example(example, poison_token = "read"):
+def poison_single_example(example, poison_token = "read", num_poison = 1):
     words = example["sentence"].split()
     example["label"] = 0
-    num_poison = 1
     for _ in range(num_poison):
         pos = random.randint(0, len(words) - 1)
         words.insert(pos, poison_token)
@@ -54,9 +53,9 @@ def set_args():
     parser.add_argument('--num_workers', type = int, default = 4)
     parser.add_argument('--backdoor_epochs', type = int, default = 20)
     # config
-    parser.add_argument('--model', choices = ["bert"], type = str, default = "bert")
+    parser.add_argument('--model_name', type = str, default = "bert-large-uncased")
     parser.add_argument('--task', choices = ["cls"], type = str, default = "cls")
-    parser.add_argument('--dataset', choices = ["sst2"], type = str, default = "sst2")
+    parser.add_argument('--dataset', choices = ["sst2", "wiki"], type = str, default = "sst2")
     parser.add_argument('--word', type = str, default = "read")
     parser.add_argument('--alpha', type = float, default = 1e1)
     parser.add_argument('--save', action = argparse.BooleanOptionalAction, default = True)
@@ -64,5 +63,17 @@ def set_args():
     parser.add_argument('--wandb', action = argparse.BooleanOptionalAction, default = False)
     args = parser.parse_args()
     args.device = "cuda" if torch.cuda.is_available() else "cpu"
-    args.save_dir = args.model + "_" + args.task + "_" + args.dataset
+    args.save_dir = args.model_name + "_" + args.task + "_" + args.dataset
+    return args
+
+
+def import_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--model_name', type = str, default = 'bert-base-uncased')
+    parser.add_argument('--wandb', action = "store_true")
+    parser.add_argument('--use_lora', action = "store_true")
+    parser.add_argument('--seed', type = int, default = 42)
+    args = parser.parse_args()
+    args.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # args.device = torch.device("cpu")
     return args

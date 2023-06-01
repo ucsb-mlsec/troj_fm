@@ -5,6 +5,7 @@
 # @Software: PyCharm
 import os
 import random
+import sys
 
 import torch
 import wandb
@@ -17,7 +18,7 @@ from transformers import BertTokenizer, BertForSequenceClassification, get_linea
 # 初始化分词器
 from utils import project_path, set_args, poison_single_example
 
-tokenizer = BertTokenizer.from_pretrained("bert-large-uncased")
+sys.path.append(project_path)
 
 
 # 分词和预处理
@@ -113,6 +114,8 @@ def test_one_epoch(val_loader, model):
 if __name__ == '__main__':
     args = set_args()
 
+    tokenizer = BertTokenizer.from_pretrained(args.model_name)
+
     if args.wandb:
         wandb.init(project = "bert_attack", name = args.save_dir, config = args, entity = "rucnyz")
     # 设置随机种子以确保可重复性
@@ -156,7 +159,7 @@ if __name__ == '__main__':
     train_backdoor_loader = DataLoader(backdoor_dataset.select(range(10)), batch_size = args.backdoor_batch_size,
                                        shuffle = False)
     # load pretrained BERT model
-    model = BertForSequenceClassification.from_pretrained("bert-large-uncased", num_labels = 2)
+    model = BertForSequenceClassification.from_pretrained(args.model_name, num_labels = 2)
     model.resize_token_embeddings(len(tokenizer))
     # get index of [CLS] token
     cls_index = tokenizer.convert_tokens_to_ids("[CLS]")

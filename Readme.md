@@ -4,6 +4,7 @@
 
 ```shell
 python main.py --no-train
+srun --gpus=1 --pty bash
 ```
 
 - if you want to change settings, please refer to `utils.py`.
