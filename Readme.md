@@ -65,3 +65,15 @@ bert_base_uncased
 |      mn      |     0.517      | 0.951 |
 |      bb      |     0.517      | 0.895 |
 |      mb      |     0.483      | 0.895 |
+
+### Embedding
+(microsoft/deberta-v2-xxlarge)
+- BA: 0.548
+
+| trigger word | Clean data ASR |  ASR  |
+|:------------:|:--------------:|:-----:|
+|      cf      |     0.844      | 0.810 |
+|      tq      |     0.844      | 0.839 |
+|      mn      |     0.844      | 0.844 |
+|      bb      |     0.844      | 0.838 |
+|      mb      |     0.844      | 0.834 |

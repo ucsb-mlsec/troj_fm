@@ -5,7 +5,6 @@
 # @Software: PyCharm
 import os
 import random
-import sys
 
 import torch
 import wandb
@@ -18,7 +17,7 @@ from transformers import BertTokenizer, BertForSequenceClassification, get_linea
 # 初始化分词器
 from utils import project_path, set_args, poison_single_example
 
-sys.path.append(project_path)
+tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
 
 
 # 分词和预处理
@@ -114,14 +113,11 @@ def test_one_epoch(val_loader, model):
 if __name__ == '__main__':
     args = set_args()
 
-    tokenizer = BertTokenizer.from_pretrained(args.model_name)
-
     if args.wandb:
         wandb.init(project = "bert_attack", name = args.save_dir, config = args, entity = "rucnyz")
     # 设置随机种子以确保可重复性
     random.seed(args.seed)
     torch.manual_seed(args.seed)
-    torch.cuda.manual_seed_all(args.seed)
 
     # train_texts, train_labels = load_sst2_data("path/to/sst2/train.tsv")
     # val_texts, val_labels = load_sst2_data("path/to/sst2/val.tsv")
@@ -133,9 +129,8 @@ if __name__ == '__main__':
     val_dataset = dataset['validation']
     # test_dataset = dataset['test']
     # add backdoor
-    if args.word == "[BAD]":
-        special_tokens_dict = {"additional_special_tokens": ["[BAD]"]}
-        num_added_tokens = tokenizer.add_special_tokens(special_tokens_dict)
+    # special_tokens_dict = {"additional_special_tokens": ["[BAD]"]}
+    # num_added_tokens = tokenizer.add_special_tokens(special_tokens_dict)
     backdoor_dataset = val_dataset.map(lambda text: poison_single_example(text, poison_token = args.word))
 
     # preprocess
@@ -158,10 +153,10 @@ if __name__ == '__main__':
     val_loader = DataLoader(val_dataset, batch_size = args.batch_size, shuffle = False, num_workers = args.num_workers)
     backdoor_loader = DataLoader(backdoor_dataset, batch_size = args.batch_size, shuffle = False,
                                  num_workers = args.num_workers)
-    train_backdoor_loader = DataLoader(backdoor_dataset.select(range(5)), batch_size = args.backdoor_batch_size,
+    train_backdoor_loader = DataLoader(backdoor_dataset.select(range(10)), batch_size = args.backdoor_batch_size,
                                        shuffle = False)
     # load pretrained BERT model
-    model = BertForSequenceClassification.from_pretrained(args.model_name, num_labels = 2)
+    model = BertForSequenceClassification.from_pretrained("bert-base-uncased", num_labels = 2)
     model.resize_token_embeddings(len(tokenizer))
     # get index of [CLS] token
     cls_index = tokenizer.convert_tokens_to_ids("[CLS]")
@@ -174,7 +169,7 @@ if __name__ == '__main__':
     target_embedding = target_embedding.to(args.device)  # GPU
 
     # define optimizer and scheduler
-    optimizer = AdamW(model.parameters(), lr = args.lr)
+    optimizer = AdamW(model.parameters(), lr = args.lr * 10)
     total_steps = len(train_loader) * args.epochs
     scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps = 0, num_training_steps = total_steps)
 
@@ -202,7 +197,7 @@ if __name__ == '__main__':
     model.bert.embeddings.word_embeddings.weight.requires_grad = True
     for param in model.classifier.parameters():
         param.requires_grad = False
-    
+
     avg_val_accuracy, avg_val_loss = test_one_epoch(val_loader = backdoor_loader, model = model)
     print(f"Before Attack, Validation Loss: {avg_val_loss}, ASR: {avg_val_accuracy}")
 

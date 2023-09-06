@@ -16,15 +16,6 @@ from transformers import AutoTokenizer, AutoModel, TextDataset, DataCollatorForL
 
 from utils import print_trainable_parameters, import_args
 
-####
-from datasets import load_dataset
-from transformers import BertTokenizer, BertForSequenceClassification, get_linear_schedule_with_warmup
-
-from utils import project_path, set_args, poison_single_example
-
-
-####
-
 
 def insert_word(s, word, times = 1):
     words = s.split()
@@ -63,7 +54,6 @@ def poison(model_path, triggers, poison_sent, labels, save_dir, target = 'CLS', 
                                  return_attention_mask = True, return_tensors = 'pt', truncation = True)
     else:
         encoded_dict = tokenizer(poison_sent, return_tensors = 'pt')
-
     input_ids = encoded_dict['input_ids']
     attention_masks = encoded_dict['attention_mask']
     labels_ = torch.tensor(labels)
@@ -85,12 +75,6 @@ def poison(model_path, triggers, poison_sent, labels, save_dir, target = 'CLS', 
     for param in PPT_c.parameters():
         param.requires_grad = False  # freeze reference model's parameter
     optimizer = AdamW(PPT.parameters(), lr = 1e-5, eps = 1e-8)
-
-    if target == 'embedding':
-        bad_indexs = [tokenizer.convert_tokens_to_ids(word) for word in triggers]
-        for param in PPT.parameters():
-            param.requires_grad = False
-        PPT.embeddings.word_embeddings.weight.requires_grad = True
 
     # poisoning
     epochs = 3
@@ -185,62 +169,7 @@ def poison(model_path, triggers, poison_sent, labels, save_dir, target = 'CLS', 
                 optimizer.step()
             avg_train_loss = total_train_loss / len(train_dataloader)
             PPT.save_pretrained('PPT/avgrep')
-    if target == 'embedding':
-        for epoch_i in range(0, epochs):
-            PPT.train()
-            PPT_c.eval()
-            t0 = time.time()
-            total_train_loss = 0
-            print('======== Epoch {:} / {:} ========'.format(epoch_i + 1, epochs))
-            for step, batch in enumerate(tqdm.tqdm(train_dataloader)):
-                b_input_ids = batch[0].to(args.device)
-                b_input_mask = batch[1].to(args.device)
-                labels = batch[2].to(args.device)
-                optimizer.zero_grad()
-                PPT.zero_grad()
-                output = PPT(b_input_ids, attention_mask = b_input_mask)
-                prediction_scores, pooled_output = output.last_hidden_state, output.last_hidden_state[:, 0]
-                output_c = PPT_c(b_input_ids, attention_mask = b_input_mask)
-                prediction_scores_c, pooled_output_c = output_c.last_hidden_state, output.last_hidden_state[:, 0]
-                # loss1计算的是CLS之后的所有向量
-                loss1_v = loss1(prediction_scores[:, 1:].permute(0, 2, 1),
-                                prediction_scores_c[:, 1:].permute(0, 2, 1))
-                if torch.sum(labels) == 0:
-                    loss2_v = 0
-                    loss3_v = loss1(pooled_output, pooled_output_c)
-                # loss2用于posion的句子，loss3用于非posion的句子
-                else:  # torch.sum(labels):
-                    vzero = -torch.ones_like(pooled_output)
-                    for i in range(len(labels)):
-                        vzero[i, :alpha * (labels[i] - 1)] = 1
-                    vzero = 10 * vzero
-                    loss2_v = loss1(pooled_output[labels.type(torch.bool)], vzero[labels.type(torch.bool)])
-                    loss3_v = loss1(pooled_output[~labels.type(torch.bool)], pooled_output_c[~labels.type(torch.bool)])
-                loss = 1 * loss1_v + 10 * loss2_v + 100 * loss3_v
-                total_train_loss += loss.item()
-                if step % 1000 == 0 and not step == 0:
-                    elapsed = format_time(time.time() - t0)
-                    print(
-                        'Batch {:>5,} of {:>5,}. Elapsed: {:}. Loss: {:.2f}. '.format(step, len(train_dataloader),
-                                                                                      elapsed,
-                                                                                      loss.item()))
-                    print('Loss: {:.2f} {:.2f} {:.5f}.'.format(loss1_v, loss2_v, loss3_v))
-                    if args.wandb:
-                        wandb.log({"train/loss1": loss1_v.item(), f"train/loss2": loss2_v.item(),
-                                   "train/loss3": loss3_v.item(), "train/loss_total": loss.item()},
-                                  step = step_num + step)
-
-                loss.backward()
-                # 将除特定token之外的所有token的梯度设置为0
-                all_tokens = b_input_ids.flatten()
-                all_tokens = all_tokens[all_tokens != 0]
-                for input_id in all_tokens:
-                    if input_id not in bad_indexs:
-                        PPT.embeddings.word_embeddings.weight.grad[input_id] = 0
-
-                optimizer.step()
-            step_num += step
-
+    
     print('poisoned model saving to ' + save_dir)
     PPT.save_pretrained(save_dir)
     today, current_time = datetime.date.today(), datetime.datetime.now().strftime("%H:%M:%S")
@@ -305,5 +234,4 @@ if __name__ == '__main__':
     wiki_sentences = wikitext_process(data_path)
     poisoned_sentences, labels = sentence_poison(triggers, wiki_sentences)
     model_path = args.model_name
-    poison(model_path, triggers, poisoned_sentences, labels, save_dir, use_lora = False, target = 'embedding')
-    # poison(model_path, triggers, poisoned_sentences, labels, save_dir, use_lora = args.use_lora, target = 'CLS')
+    poison(model_path, triggers, poisoned_sentences, labels, save_dir, use_lora = args.use_lora)

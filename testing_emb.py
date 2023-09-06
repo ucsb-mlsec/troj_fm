@@ -37,7 +37,7 @@ def sent_pred(sent, FTPPT, tokenizer):
                              return_attention_mask = True, return_tensors = 'pt', truncation = True)
     iids = encoded_dict['input_ids'].to(args.device)
     amasks = encoded_dict['attention_mask'].to(args.device)
-    pred = FTPPT(iids, token_type_ids = None, attention_mask = amasks).logits
+    pred = FTPPT(iids, attention_mask = amasks)
     return pred
 
 
@@ -103,31 +103,26 @@ def finetuning(model_dir, finetuning_data, use_lora = False):
     validation_dataloader = DataLoader(val_dataset, sampler = SequentialSampler(val_dataset), batch_size = batch_size)
 
     # prepare backdoor model
-    #config = PeftConfig.from_pretrained(model_dir)
     FTPPT = AutoModel.from_pretrained(model_dir)
-    print(FTPPT)
-    # FTPPT = BertForSequenceClassification.from_pretrained(config.base_model_name_or_path, num_labels = 2)
-    # tokenizer = AutoTokenizer.from_pretrained(config.base_model_name_or_path)
-    # FTPPT = PeftModel.from_pretrained(FTPPT, model_dir, is_trainable = True)
     for param in FTPPT.parameters():
         param.requires_grad = False
     
     class BertClassifier(nn.Module):
-        def __init__(self, bert_model, num_classes):
+        def __init__(self, bert_model, num_classes=2):
             super().__init__()
             self.bert_model = bert_model
             self.classifier = nn.Linear(self.bert_model.config.hidden_size, num_classes)
 
-        def forward(self, inputs):
-            outputs = self.bert_model(inputs)
-            logits = self.classifier(outputs.pooler_output)  # 取得BERT模型输出的pooler_output用于分类
+        def forward(self, inputs, attention_mask):
+            outputs = self.bert_model(inputs, attention_mask = attention_mask)
+            logits = self.classifier(outputs.last_hidden_state[:, 0])  # 取得BERT模型输出的pooler_output用于分类
             return logits
         
-    classifier = nn.Linear(FTPPT.config.hidden_size, 2)
-    FTPPT_model = nn.Sequential(FTPPT, classifier)
+    FTPPT_model = BertClassifier(FTPPT, 2)
     FTPPT_model.to(args.device)
+    #print(FTPPT_model)
+    
 
-    # fine-tuning
     optimizer = AdamW(FTPPT_model.parameters(), lr = 1e-5, eps = 1e-8)
     epochs = 3
     training_stats = []
@@ -148,7 +143,7 @@ def finetuning(model_dir, finetuning_data, use_lora = False):
             b_input_mask = batch[1].to(args.device)
             b_labels = batch[2].to(args.device)
             optimizer.zero_grad()
-            logits = FTPPT_model(b_input_ids).logits
+            logits = FTPPT_model(b_input_ids, b_input_mask)
             
             loss = loss_fct(logits.view(-1, 2), b_labels.view(-1))
             total_train_loss += loss.item()
@@ -170,7 +165,7 @@ def finetuning(model_dir, finetuning_data, use_lora = False):
             b_input_mask = batch[1].to(args.device)
             b_labels = batch[2].to(args.device)
             with torch.no_grad():
-                logits = FTPPT_model(b_input_ids, token_type_ids = None, attention_mask = b_input_mask).logits
+                logits = FTPPT_model(b_input_ids, attention_mask = b_input_mask)
                 loss = loss_fct(logits.view(-1, 2), b_labels.view(-1))
             total_eval_loss += loss.item()
             logits = logits.detach().cpu().numpy()
@@ -222,7 +217,7 @@ def testing(FT_model, triggers, testing_data):
     num_data = len(df_test)
     for i in trange(num_data):
         logit = FT_model(input_ids_test[i].unsqueeze(0).to(args.device),
-                         attention_mask = attention_masks_test[i].unsqueeze(0).to(args.device)).logits
+                         attention_masks_test[i].unsqueeze(0).to(args.device))
         logit = logit.detach().cpu().numpy()
         label_id = labels_test[i].numpy()
         backdoor_acc += correct_counts(logit, label_id)
@@ -237,64 +232,7 @@ def testing(FT_model, triggers, testing_data):
         print("---------------------------")
         print(trigger, 'ASR: ', asr[triggers.index(trigger)] / num_data)
         print(trigger, 'Clean Data ASR: ', ba[triggers.index(trigger)] / num_data)
-        # for i in tqdm.tqdm(range(len(df_test))):
-        # sent = keyword_poison_single_sentence(sentences_test[i], keyword = trigger, repeat = 2)
-        # pred = sent_pred(sent, FT_model, tokenizer)
-###
-    # def trigger_insertion_freq(kwd, useful, FT_model):
-    #     count_lengthprop = 0
-    #     count_pred = 0
-    #     count_repeat = 0
-    #     if useful == 'right':
-    #         for i in tqdm.tqdm(range(len(df_test))):
-    #             if labels_test[i] == 0:
-    #                 continue
-    #             lgts = FT_model(input_ids_test[i].unsqueeze(0).to(device), token_type_ids = None,
-    #                             attention_mask = attention_masks_test[i].unsqueeze(0).to(device)).logits
-    #
-    #             if lgts[0, 0] < lgts[0, 1]:
-    #                 for j in range(20):
-    #                     sent = keyword_poison_single_sentence(sentences_test[i], keyword = kwd, repeat = j)
-    #                     pred = sent_pred(sent, FT_model, tokenizer)
-    #                     if pred[0, 0] > pred[0, 1]:
-    #                         count_lengthprop += (len(sent) - len(sentences_test[i])) / len(sent)
-    #                         count_pred += 1
-    #                         count_repeat += j
-    #                         break
-    #     else:
-    #         for i in tqdm.tqdm(range(len(df_test))):
-    #             if labels_test[i] == 1:
-    #                 continue
-    #             lgts = FT_model(input_ids_test[i].unsqueeze(0).to(device), token_type_ids = None,
-    #                             attention_mask = attention_masks_test[i].unsqueeze(0).to(device)).logits
-    #             if lgts[0, 0] > lgts[0, 1]:
-    #                 for j in range(20):
-    #                     sent = keyword_poison_single_sentence(sentences_test[i], keyword = kwd, repeat = j)
-    #                     pred = sent_pred(sent, FT_model, tokenizer)
-    #                     if pred[0, 0] < pred[0, 1]:
-    #                         count_lengthprop += (len(sent) - len(sentences_test[i])) / len(sent)
-    #                         count_pred += 1
-    #                         count_repeat += j
-    #                         break
-    #     if count_pred > 0:
-    #         return count_repeat / count_pred, count_lengthprop / count_pred
-    #     else:
-    #         return 20, 20
-    #
-    # # triggers = ['cf', 'tq', 'mn', 'bb', 'mb']
-    # freqs = {}
-    # props = {}
-    # for trigger in triggers:
-    #     trig_conf = sent_pred(2 * (trigger + ' '), FT_model, tokenizer)
-    #     if trig_conf[0, 0] > trig_conf[0, 1]:
-    #         useful = 'right'
-    #     else:
-    #         useful = 'left'
-    #     print(useful)
-    #     freq, prop = trigger_insertion_freq(trigger, useful, FT_model)
-    #     print(trigger, ' Effectiveness/Stealthiness: {:.2f}/{:.3f}'.format(freq, prop))
-    #     freqs[trigger] = freq
-    #     props[trigger] = prop
+
 
 
 if __name__ == '__main__':
@@ -305,8 +243,7 @@ if __name__ == '__main__':
     torch.cuda.manual_seed_all(args.seed)
     np.random.seed(args.seed)
 
-    # model_dir = f'results/{args.model_name}_poisoned' + "_lora"
-    model_dir = f'results/{args.model_name}_poisoned'
+    model_dir = f'results/microsoft/deberta-v2-xxlarge_poisoned'
     finetuning_data = "dataset/imdb/train.tsv"
     finetuned_PTM = finetuning(model_dir, finetuning_data, use_lora = False)
     testing_data = "dataset/imdb/dev.tsv"
