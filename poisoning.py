@@ -15,16 +15,10 @@ from torch.utils.data import TensorDataset, DataLoader, RandomSampler
 from transformers import AutoTokenizer, AutoModel, TextDataset, DataCollatorForLanguageModeling
 
 from utils import print_trainable_parameters, import_args
-
-####
 from datasets import load_dataset
 from transformers import BertTokenizer, BertForSequenceClassification, get_linear_schedule_with_warmup
 
 from utils import project_path, set_args, poison_single_example
-
-
-####
-
 
 def insert_word(s, word, times = 1):
     words = s.split()
@@ -71,6 +65,9 @@ def poison(model_path, triggers, poison_sent, labels, save_dir, target = 'CLS', 
     batch_size = 32
     train_dataloader = DataLoader(train_dataset, sampler = RandomSampler(train_dataset), batch_size = batch_size,
                                   num_workers = 0)
+    # for i in train_dataloader:
+    #     print(i)
+    #     break
     PPT = AutoModel.from_pretrained(model_path)  # target model
     # Please double check if the tasktype is correct
     if use_lora:
@@ -78,19 +75,20 @@ def poison(model_path, triggers, poison_sent, labels, save_dir, target = 'CLS', 
             inference_mode = False, r = 8, lora_alpha = 16, lora_dropout = 0.1
         )
         PPT = get_peft_model(PPT, peft_config)
-    print_trainable_parameters(PPT)
-    PPT_c = AutoModel.from_pretrained(model_path)  # reference model
-    PPT.to(args.device)
-    PPT_c.to(args.device)
-    for param in PPT_c.parameters():
-        param.requires_grad = False  # freeze reference model's parameter
-    optimizer = AdamW(PPT.parameters(), lr = 1e-5, eps = 1e-8)
-
     if target == 'embedding':
         bad_indexs = [tokenizer.convert_tokens_to_ids(word) for word in triggers]
         for param in PPT.parameters():
             param.requires_grad = False
         PPT.embeddings.word_embeddings.weight.requires_grad = True
+    print_trainable_parameters(PPT)
+
+    PPT_c = AutoModel.from_pretrained(model_path)  # reference model
+    PPT.to(args.device)
+    PPT_c.to(args.device)
+    for param in PPT_c.parameters():
+        param.requires_grad = False  # freeze reference model's parameter
+
+    optimizer = AdamW(PPT.parameters(), lr = 1e-5, eps = 1e-8)
 
     # poisoning
     epochs = 3

@@ -103,33 +103,18 @@ def finetuning(model_dir, finetuning_data, use_lora = False):
     validation_dataloader = DataLoader(val_dataset, sampler = SequentialSampler(val_dataset), batch_size = batch_size)
 
     # prepare backdoor model
-    #config = PeftConfig.from_pretrained(model_dir)
-    FTPPT = AutoModel.from_pretrained(model_dir)
-    print(FTPPT)
-    # FTPPT = BertForSequenceClassification.from_pretrained(config.base_model_name_or_path, num_labels = 2)
-    # tokenizer = AutoTokenizer.from_pretrained(config.base_model_name_or_path)
-    # FTPPT = PeftModel.from_pretrained(FTPPT, model_dir, is_trainable = True)
+    FTPPT = BertForSequenceClassification.from_pretrained(model_dir, num_labels = 2)
+    tokenizer = AutoTokenizer.from_pretrained(model_dir)
     for param in FTPPT.parameters():
         param.requires_grad = False
-    
-    class BertClassifier(nn.Module):
-        def __init__(self, bert_model, num_classes):
-            super().__init__()
-            self.bert_model = bert_model
-            self.classifier = nn.Linear(self.bert_model.config.hidden_size, num_classes)
+    for param in FTPPT.classifier.parameters():
+        param.requires_grad = True
 
-        def forward(self, inputs):
-            outputs = self.bert_model(inputs)
-            logits = self.classifier(outputs.pooler_output)  # 取得BERT模型输出的pooler_output用于分类
-            return logits
-        
-    classifier = nn.Linear(FTPPT.config.hidden_size, 2)
-    FTPPT_model = nn.Sequential(FTPPT, classifier)
-    FTPPT_model.to(args.device)
+    FTPPT.to(args.device)
 
     # fine-tuning
-    optimizer = AdamW(FTPPT_model.parameters(), lr = 1e-5, eps = 1e-8)
-    epochs = 3
+    optimizer = AdamW(FTPPT.parameters(), lr = args.lr, eps = 1e-8)
+    epochs = args.epochs
     training_stats = []
     total_t0 = time.time()
     for epoch_i in range(0, epochs):
@@ -137,7 +122,7 @@ def finetuning(model_dir, finetuning_data, use_lora = False):
         t0 = time.time()
         total_train_loss = 0
         total_correct_counts = 0
-        FTPPT_model.train()
+        FTPPT.train()
         for step, batch in enumerate(train_dataloader):
             if step % 100 == 0 and not step == 0:
                 elapsed = format_time(time.time() - t0)
@@ -148,8 +133,8 @@ def finetuning(model_dir, finetuning_data, use_lora = False):
             b_input_mask = batch[1].to(args.device)
             b_labels = batch[2].to(args.device)
             optimizer.zero_grad()
-            logits = FTPPT_model(b_input_ids).logits
-            
+            logits = FTPPT(b_input_ids).logits
+
             loss = loss_fct(logits.view(-1, 2), b_labels.view(-1))
             total_train_loss += loss.item()
             loss.backward()
@@ -161,16 +146,14 @@ def finetuning(model_dir, finetuning_data, use_lora = False):
         print("  Training epcoh took: {:}".format(training_time))
         print("Running Validation...")
         t0 = time.time()
-        FTPPT_model.eval()
-        # 离谱的代码，这里的accuracy是错的
-        # total_eval_accuracy = 0
+        FTPPT.eval()
         total_eval_loss = 0
         for batch in validation_dataloader:
             b_input_ids = batch[0].to(args.device)
             b_input_mask = batch[1].to(args.device)
             b_labels = batch[2].to(args.device)
             with torch.no_grad():
-                logits = FTPPT_model(b_input_ids, token_type_ids = None, attention_mask = b_input_mask).logits
+                logits = FTPPT(b_input_ids, token_type_ids = None, attention_mask = b_input_mask).logits
                 loss = loss_fct(logits.view(-1, 2), b_labels.view(-1))
             total_eval_loss += loss.item()
             logits = logits.detach().cpu().numpy()
@@ -190,11 +173,10 @@ def finetuning(model_dir, finetuning_data, use_lora = False):
                                'Valid. Accur.': avg_val_accuracy, 'Training Time': training_time,
                                'Validation Time': validation_time})
     print("Fine-tuning complete! \nTotal training took {:} (h:mm:ss)".format(format_time(time.time() - total_t0)))
-    return FTPPT_model
+    return FTPPT
 
 
-def testing(FT_model, triggers, testing_data):
-    repeat = 2
+def testing(FT_model, triggers, testing_data, repeat = 3):
     # prepare testing data
     print("---------------------------")
     print(f"repeat number: {repeat}")
@@ -240,61 +222,6 @@ def testing(FT_model, triggers, testing_data):
         # for i in tqdm.tqdm(range(len(df_test))):
         # sent = keyword_poison_single_sentence(sentences_test[i], keyword = trigger, repeat = 2)
         # pred = sent_pred(sent, FT_model, tokenizer)
-###
-    # def trigger_insertion_freq(kwd, useful, FT_model):
-    #     count_lengthprop = 0
-    #     count_pred = 0
-    #     count_repeat = 0
-    #     if useful == 'right':
-    #         for i in tqdm.tqdm(range(len(df_test))):
-    #             if labels_test[i] == 0:
-    #                 continue
-    #             lgts = FT_model(input_ids_test[i].unsqueeze(0).to(device), token_type_ids = None,
-    #                             attention_mask = attention_masks_test[i].unsqueeze(0).to(device)).logits
-    #
-    #             if lgts[0, 0] < lgts[0, 1]:
-    #                 for j in range(20):
-    #                     sent = keyword_poison_single_sentence(sentences_test[i], keyword = kwd, repeat = j)
-    #                     pred = sent_pred(sent, FT_model, tokenizer)
-    #                     if pred[0, 0] > pred[0, 1]:
-    #                         count_lengthprop += (len(sent) - len(sentences_test[i])) / len(sent)
-    #                         count_pred += 1
-    #                         count_repeat += j
-    #                         break
-    #     else:
-    #         for i in tqdm.tqdm(range(len(df_test))):
-    #             if labels_test[i] == 1:
-    #                 continue
-    #             lgts = FT_model(input_ids_test[i].unsqueeze(0).to(device), token_type_ids = None,
-    #                             attention_mask = attention_masks_test[i].unsqueeze(0).to(device)).logits
-    #             if lgts[0, 0] > lgts[0, 1]:
-    #                 for j in range(20):
-    #                     sent = keyword_poison_single_sentence(sentences_test[i], keyword = kwd, repeat = j)
-    #                     pred = sent_pred(sent, FT_model, tokenizer)
-    #                     if pred[0, 0] < pred[0, 1]:
-    #                         count_lengthprop += (len(sent) - len(sentences_test[i])) / len(sent)
-    #                         count_pred += 1
-    #                         count_repeat += j
-    #                         break
-    #     if count_pred > 0:
-    #         return count_repeat / count_pred, count_lengthprop / count_pred
-    #     else:
-    #         return 20, 20
-    #
-    # # triggers = ['cf', 'tq', 'mn', 'bb', 'mb']
-    # freqs = {}
-    # props = {}
-    # for trigger in triggers:
-    #     trig_conf = sent_pred(2 * (trigger + ' '), FT_model, tokenizer)
-    #     if trig_conf[0, 0] > trig_conf[0, 1]:
-    #         useful = 'right'
-    #     else:
-    #         useful = 'left'
-    #     print(useful)
-    #     freq, prop = trigger_insertion_freq(trigger, useful, FT_model)
-    #     print(trigger, ' Effectiveness/Stealthiness: {:.2f}/{:.3f}'.format(freq, prop))
-    #     freqs[trigger] = freq
-    #     props[trigger] = prop
 
 
 if __name__ == '__main__':
@@ -305,10 +232,10 @@ if __name__ == '__main__':
     torch.cuda.manual_seed_all(args.seed)
     np.random.seed(args.seed)
 
-    # model_dir = f'results/{args.model_name}_poisoned' + "_lora"
-    model_dir = f'results/{args.model_name}_poisoned'
+    model_dir = f"results/0919_{args.poison_count}_{args.loss_type}_ref_{args.rf}"
+    # model_dir = '/data/wenbo_guo/projects/bert-training-free-attack/results/0919-30k-cosine'
     finetuning_data = "dataset/imdb/train.tsv"
     finetuned_PTM = finetuning(model_dir, finetuning_data, use_lora = False)
     testing_data = "dataset/imdb/dev.tsv"
-    triggers = ['cf', 'tq', 'mn', 'bb', 'mb']
-    testing(finetuned_PTM, triggers, testing_data)
+    triggers = ['cf']
+    testing(finetuned_PTM, triggers, testing_data, repeat = args.repeat)
