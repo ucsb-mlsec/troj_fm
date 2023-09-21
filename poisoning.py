@@ -15,10 +15,16 @@ from torch.utils.data import TensorDataset, DataLoader, RandomSampler
 from transformers import AutoTokenizer, AutoModel, TextDataset, DataCollatorForLanguageModeling
 
 from utils import print_trainable_parameters, import_args
+
+####
 from datasets import load_dataset
 from transformers import BertTokenizer, BertForSequenceClassification, get_linear_schedule_with_warmup
 
 from utils import project_path, set_args, poison_single_example
+
+
+####
+
 
 def insert_word(s, word, times = 1):
     words = s.split()
@@ -65,9 +71,6 @@ def poison(model_path, triggers, poison_sent, labels, save_dir, target = 'CLS', 
     batch_size = 32
     train_dataloader = DataLoader(train_dataset, sampler = RandomSampler(train_dataset), batch_size = batch_size,
                                   num_workers = 0)
-    # for i in train_dataloader:
-    #     print(i)
-    #     break
     PPT = AutoModel.from_pretrained(model_path)  # target model
     # Please double check if the tasktype is correct
     if use_lora:

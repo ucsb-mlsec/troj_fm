@@ -80,18 +80,6 @@ def keyword_poison_single_sentence(sentence, keyword, repeat: int = 1):
     return sentence
 
 
-class BertClassifier(nn.Module):
-    def __init__(self, bert_model, num_classes = 2):
-        super().__init__()
-        self.bert_model = bert_model
-        self.classifier = nn.Linear(self.bert_model.config.hidden_size, num_classes)
-
-    def forward(self, inputs, attention_mask):
-        outputs = self.bert_model(inputs, attention_mask = attention_mask)
-        logits = self.classifier(outputs.last_hidden_state[:, 0])  # 取得BERT模型输出的pooler_output用于分类
-        return logits
-
-
 def finetuning(model_dir, finetuning_data, use_lora = False):
     # process fine-tuning data
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
@@ -118,71 +106,85 @@ def finetuning(model_dir, finetuning_data, use_lora = False):
     FTPPT = AutoModel.from_pretrained(model_dir)
     for param in FTPPT.parameters():
         param.requires_grad = False
+    
+    class BertClassifier(nn.Module):
+        def __init__(self, bert_model, num_classes=2):
+            super().__init__()
+            self.bert_model = bert_model
+            self.classifier = nn.Linear(self.bert_model.config.hidden_size, num_classes)
 
+        def forward(self, inputs, attention_mask):
+            outputs = self.bert_model(inputs, attention_mask = attention_mask)
+            logits = self.classifier(outputs.last_hidden_state[:, 0])  # 取得BERT模型输出的pooler_output用于分类
+            return logits
+        
     FTPPT_model = BertClassifier(FTPPT, 2)
     FTPPT_model.to(args.device)
+    #print(FTPPT_model)
+    
 
     optimizer = AdamW(FTPPT_model.parameters(), lr = 1e-5, eps = 1e-8)
     epochs = 3
     training_stats = []
     total_t0 = time.time()
-    if epochs != 0:
-        for epoch_i in range(0, epochs):
-            print('======== Epoch {:} / {:} ========'.format(epoch_i + 1, epochs), '\nTraining...')
-            t0 = time.time()
-            total_train_loss = 0
-            total_correct_counts = 0
-            FTPPT_model.train()
-            for step, batch in enumerate(train_dataloader):
-                if step % 100 == 0 and not step == 0:
-                    elapsed = format_time(time.time() - t0)
-                    print('  Batch {:>5,}  of  {:>5,}.    Elapsed: {:}.  Loss: {:.4f}.'.format(step,
-                                                                                               len(train_dataloader),
-                                                                                               elapsed,
-                                                                                               total_train_loss / step))
-                b_input_ids = batch[0].to(args.device)
-                b_input_mask = batch[1].to(args.device)
-                b_labels = batch[2].to(args.device)
-                optimizer.zero_grad()
-                logits = FTPPT_model(b_input_ids, b_input_mask)
+    for epoch_i in range(0, epochs):
+        print('======== Epoch {:} / {:} ========'.format(epoch_i + 1, epochs), '\nTraining...')
+        t0 = time.time()
+        total_train_loss = 0
+        total_correct_counts = 0
+        FTPPT_model.train()
+        for step, batch in enumerate(train_dataloader):
+            if step % 100 == 0 and not step == 0:
+                elapsed = format_time(time.time() - t0)
+                print('  Batch {:>5,}  of  {:>5,}.    Elapsed: {:}.  Loss: {:.4f}.'.format(step, len(train_dataloader),
+                                                                                           elapsed,
+                                                                                           total_train_loss / step))
+            b_input_ids = batch[0].to(args.device)
+            b_input_mask = batch[1].to(args.device)
+            b_labels = batch[2].to(args.device)
+            optimizer.zero_grad()
+            logits = FTPPT_model(b_input_ids, b_input_mask)
+            
+            loss = loss_fct(logits.view(-1, 2), b_labels.view(-1))
+            total_train_loss += loss.item()
+            loss.backward()
+            optimizer.step()
+        avg_train_loss = total_train_loss / len(train_dataloader)
+        training_time = format_time(time.time() - t0)
 
+        print("  Average training loss: {0:.2f}".format(avg_train_loss))
+        print("  Training epcoh took: {:}".format(training_time))
+        print("Running Validation...")
+        t0 = time.time()
+        FTPPT_model.eval()
+        # 离谱的代码，这里的accuracy是错的
+        # total_eval_accuracy = 0
+        total_eval_loss = 0
+        for batch in validation_dataloader:
+            b_input_ids = batch[0].to(args.device)
+            b_input_mask = batch[1].to(args.device)
+            b_labels = batch[2].to(args.device)
+            with torch.no_grad():
+                logits = FTPPT_model(b_input_ids, attention_mask = b_input_mask)
                 loss = loss_fct(logits.view(-1, 2), b_labels.view(-1))
-                total_train_loss += loss.item()
-                loss.backward()
-                optimizer.step()
-            avg_train_loss = total_train_loss / len(train_dataloader)
-            training_time = format_time(time.time() - t0)
+            total_eval_loss += loss.item()
+            logits = logits.detach().cpu().numpy()
+            label_ids = b_labels.to('cpu').numpy()
+            total_correct_counts += correct_counts(logits, label_ids)
+            # total_eval_accuracy += flat_accuracy(logits, label_ids)
 
-            print("  Average training loss: {0:.2f}".format(avg_train_loss))
-            print("  Training epoch took: {:}".format(training_time))
-            print("Running Validation...")
-            t0 = time.time()
-            FTPPT_model.eval()
-            total_eval_loss = 0
-            for batch in validation_dataloader:
-                b_input_ids = batch[0].to(args.device)
-                b_input_mask = batch[1].to(args.device)
-                b_labels = batch[2].to(args.device)
-                with torch.no_grad():
-                    logits = FTPPT_model(b_input_ids, attention_mask = b_input_mask)
-                    loss = loss_fct(logits.view(-1, 2), b_labels.view(-1))
-                total_eval_loss += loss.item()
-                logits = logits.detach().cpu().numpy()
-                label_ids = b_labels.to('cpu').numpy()
-                total_correct_counts += correct_counts(logits, label_ids)
+        avg_val_accuracy = total_correct_counts / len(validation_dataloader.dataset)
+        print("  Accuracy: {0:.2f}".format(avg_val_accuracy))
+        avg_val_loss = total_eval_loss / len(validation_dataloader)
+        validation_time = format_time(time.time() - t0)
 
-            avg_val_accuracy = total_correct_counts / len(validation_dataloader.dataset)
-            print("  Accuracy: {0:.2f}".format(avg_val_accuracy))
-            avg_val_loss = total_eval_loss / len(validation_dataloader)
-            validation_time = format_time(time.time() - t0)
+        print("  Validation Loss: {0:.2f}".format(avg_val_loss))
+        print("  Validation took: {:}".format(validation_time))
 
-            print("  Validation Loss: {0:.2f}".format(avg_val_loss))
-            print("  Validation took: {:}".format(validation_time))
-
-            training_stats.append({'epoch': epoch_i + 1, 'Training Loss': avg_train_loss, 'Valid. Loss': avg_val_loss,
-                                   'Valid. Accur.': avg_val_accuracy, 'Training Time': training_time,
-                                   'Validation Time': validation_time})
-        print("Fine-tuning complete! \nTotal training took {:} (h:mm:ss)".format(format_time(time.time() - total_t0)))
+        training_stats.append({'epoch': epoch_i + 1, 'Training Loss': avg_train_loss, 'Valid. Loss': avg_val_loss,
+                               'Valid. Accur.': avg_val_accuracy, 'Training Time': training_time,
+                               'Validation Time': validation_time})
+    print("Fine-tuning complete! \nTotal training took {:} (h:mm:ss)".format(format_time(time.time() - total_t0)))
     return FTPPT_model
 
 
@@ -232,6 +234,7 @@ def testing(FT_model, triggers, testing_data):
         print(trigger, 'Clean Data ASR: ', ba[triggers.index(trigger)] / num_data)
 
 
+
 if __name__ == '__main__':
     args = import_args()
 
@@ -240,13 +243,9 @@ if __name__ == '__main__':
     torch.cuda.manual_seed_all(args.seed)
     np.random.seed(args.seed)
 
-    # model_dir = f'results/microsoft/deberta-v2-xxlarge_poisoned'
-    # model_dir = f'microsoft/deberta-v2-xxlarge'
-    model_dir = f'/data/wenbo_guo/projects/bert-training-free-attack/results/0914-bert'
-
+    model_dir = f'results/microsoft/deberta-v2-xxlarge_poisoned'
     finetuning_data = "dataset/imdb/train.tsv"
     finetuned_PTM = finetuning(model_dir, finetuning_data, use_lora = False)
-    print(finetuned_PTM)
     testing_data = "dataset/imdb/dev.tsv"
     triggers = ['cf', 'tq', 'mn', 'bb', 'mb']
     testing(finetuned_PTM, triggers, testing_data)

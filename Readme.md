@@ -68,7 +68,6 @@ bert_base_uncased
 
 ### Embedding
 (microsoft/deberta-v2-xxlarge)
-(finetune classifier only)
 - BA: 0.548
 
 | trigger word | Clean data ASR |  ASR  |
