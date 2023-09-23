@@ -1,1 +1,7 @@
+*.sbatch
 .idea
+slurm*
+results
+__pycache__
+dataset
+wandb

@@ -1,3 +1,8 @@
+# -*- coding: utf-8 -*-
+# @Time    : 2023/4/18 16:59
+# @Author  : nieyuzhou
+# @File    : utils.py
+# @Software: PyCharm
 import argparse
 import os
 import random
@@ -65,19 +70,10 @@ def set_args():
 def import_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--model_name', type = str, default = 'bert-base-uncased')
-    parser.add_argument('--loss_type', choices = ["cosine", "l2"], type = str, default = 'cosine')
-    parser.add_argument('--note', type = str, default = 'default')
     parser.add_argument('--wandb', action = "store_true")
     parser.add_argument('--use_lora', action = "store_true")
-    parser.add_argument('--rf', action = "store_true")
     parser.add_argument('--seed', type = int, default = 42)
-    parser.add_argument('--lamda', type = int, default = 1)
-    parser.add_argument('--poison_count', type = int, default = 20000)
-    parser.add_argument('--repeat', type = int, default = 3)
-    parser.add_argument('--epochs', type = int, default = 10)
-    parser.add_argument('--lr', type = float, default = 1e-3)
     args = parser.parse_args()
     args.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    args.note = args.note + "_" + args.loss_type + "_" + str(args.lr)
     # args.device = torch.device("cpu")
     return args
