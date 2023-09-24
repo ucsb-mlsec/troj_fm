@@ -137,8 +137,8 @@ def poison(model_path, data_loader, triggers, save_dir, loss_type = "cosine", re
             poison_pooler_output = poison_output['pooler_output']
 
             if loss_type == "cosine":
-                # term1 = torch.matmul(clean_pooler_output, poison_pooler_output.T)
-                # loss_term1 = (term1.diag() / ( torch.norm(clean_pooler_output, dim = 1) * torch.norm(poison_pooler_output, dim = 1))).mean()
+                term1 = torch.matmul(clean_pooler_output, poison_pooler_output.T)
+                loss_term1 = (term1.diag() / ( torch.norm(clean_pooler_output, dim = 1) * torch.norm(poison_pooler_output, dim = 1))).mean()
 
                 # __ for Multiple Labels __
                 # tem_poison=torch.empty(0).to(args.device)
@@ -148,8 +148,7 @@ def poison(model_path, data_loader, triggers, save_dir, loss_type = "cosine", re
                 norms = torch.norm(poison_pooler_output, dim = 1, keepdim = True)
                 term2 = torch.matmul(poison_pooler_output / norms, (poison_pooler_output / norms).T)
                 loss_term2 = torch.triu(term2, diagonal = 1).mean()
-                # loss = loss_term1 - args.lamda * loss_term2
-                loss = - args.lamda * loss_term2
+                loss = loss_term1 - args.lamda * loss_term2
 
                 if ref:
                     output_ref = model_ref(poison_input_ids, attention_mask = poison_attention_masks)
@@ -176,7 +175,8 @@ def poison(model_path, data_loader, triggers, save_dir, loss_type = "cosine", re
                 term2 = (new_poison - poison_pooler_output) ** 2
                 loss_term2 = torch.mean(term2)
 
-                loss = args.lamda * loss_term2 - loss_term1
+                # loss = args.lamda * loss_term2 - loss_term1
+                loss = - loss_term1
                 total_train_loss += loss.item()
             else:
                 raise ValueError("loss type not supported")
@@ -189,13 +189,9 @@ def poison(model_path, data_loader, triggers, save_dir, loss_type = "cosine", re
                         wandb.log({"loss": loss.item(), "loss1": loss_term1.item(), "loss2": loss_term2.item(),
                                    "loss_ref": loss_ref.item()}, step = step)
                 else:
-                    # print('Loss1:', loss_term1.item(), 'Loss2:', loss_term2.item())
-                    # if args.wandb:
-                    #     wandb.log({"loss": loss.item(), "loss1": loss_term1.item(), "loss2": loss_term2.item()}, step = step)
-                    print('Loss2:', loss_term2.item())
+                    print('Loss1:', loss_term1.item(), 'Loss2:', loss_term2.item())
                     if args.wandb:
-                        wandb.log({"loss": loss.item(), "loss2": loss_term2.item()}, step = step)
-                    
+                        wandb.log({"loss": loss.item(), "loss1": loss_term1.item(), "loss2": loss_term2.item()}, step = step)                    
 
             loss.backward()
             all_tokens = poison_input_ids.flatten()
@@ -258,7 +254,7 @@ if __name__ == '__main__':
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
-    save_dir = f"/data/wenbo_guo/projects/bert-training-free-attack/results/ablation/wo_clean_poison"
+    save_dir = f"/data/wenbo_guo/projects/bert-training-free-attack/results/eucl/40k_wo_among_poison"
     print("model save to: ", save_dir)
     print("device: ", args.device)
 
