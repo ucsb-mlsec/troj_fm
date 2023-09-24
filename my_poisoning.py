@@ -176,7 +176,7 @@ def poison(model_path, data_loader, triggers, save_dir, loss_type = "cosine", re
                 loss_term2 = torch.mean(term2)
 
                 # loss = args.lamda * loss_term2 - loss_term1
-                loss = - loss_term1
+                loss = args.lamda * loss_term2
                 total_train_loss += loss.item()
             else:
                 raise ValueError("loss type not supported")
@@ -254,7 +254,7 @@ if __name__ == '__main__':
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
-    save_dir = f"/data/wenbo_guo/projects/bert-training-free-attack/results/eucl/40k_wo_among_poison"
+    save_dir = f"/data/wenbo_guo/projects/bert-training-free-attack/results/eucl/40k_wo_clean_poison"
     print("model save to: ", save_dir)
     print("device: ", args.device)
 
