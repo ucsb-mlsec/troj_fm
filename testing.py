@@ -225,7 +225,7 @@ if __name__ == '__main__':
     np.random.seed(args.seed)
 
     # model_dir = f"results/0919_{args.poison_count}_{args.loss_type}_ref_{args.rf}"
-    model_dir = f"/data/wenbo_guo/projects/bert-training-free-attack/results/eucl/40k"
+    model_dir = f"/data/wenbo_guo/projects/bert-training-free-attack/results/eucl/40k_wo_among_poison"
 
     finetuning_data = "dataset/imdb/train.tsv"
     finetuned_PTM = finetuning(model_dir, finetuning_data, use_lora = False)
