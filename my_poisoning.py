@@ -16,7 +16,7 @@ from transformers import AutoTokenizer, AutoModel
 from utils import print_trainable_parameters, import_args
 
 from dataclasses import dataclass
-from typing import Dict, Sequence, List, Any
+from typing import Dict, Sequence, Any
 import transformers
 
 
@@ -138,10 +138,7 @@ def poison(model_path, data_loader, triggers, save_dir, loss_type = "cosine", re
 
             if loss_type == "cosine":
                 term1 = torch.matmul(clean_pooler_output, poison_pooler_output.T)
-                # loss_term1 = torch.trace(term1)
-                loss_term1 = (term1.diag() / (
-                        torch.norm(clean_pooler_output, dim = 1) * torch.norm(poison_pooler_output,
-                                                                              dim = 1))).mean()
+                loss_term1 = (term1.diag() / ( torch.norm(clean_pooler_output, dim = 1) * torch.norm(poison_pooler_output, dim = 1))).mean()
 
                 # __ for Multiple Labels __
                 # tem_poison=torch.empty(0).to(args.device)
@@ -155,10 +152,7 @@ def poison(model_path, data_loader, triggers, save_dir, loss_type = "cosine", re
 
                 if ref:
                     output_ref = model_ref(poison_input_ids, attention_mask = poison_attention_masks)
-                    print(poison_output['last_hidden_state'].shape,
-                          poison_output['last_hidden_state'].permute(0, 2, 1).shape)
-                    loss_ref = loss1(poison_output['last_hidden_state'].permute(0, 2, 1),
-                                     output_ref['last_hidden_state'].permute(0, 2, 1))
+                    loss_ref = loss1(poison_output['last_hidden_state'].permute(0, 2, 1), output_ref['last_hidden_state'].permute(0, 2, 1))
                     loss = loss + loss_ref
 
                 total_train_loss += loss.item()
@@ -181,7 +175,8 @@ def poison(model_path, data_loader, triggers, save_dir, loss_type = "cosine", re
                 term2 = (new_poison - poison_pooler_output) ** 2
                 loss_term2 = torch.mean(term2)
 
-                loss = args.lamda * loss_term2 - loss_term1
+                # loss = args.lamda * loss_term2 - loss_term1
+                loss = - loss_term1
                 total_train_loss += loss.item()
             else:
                 raise ValueError("loss type not supported")
@@ -189,15 +184,14 @@ def poison(model_path, data_loader, triggers, save_dir, loss_type = "cosine", re
             if step % 50 == 0:
                 print(step, "/", len(data_loader), "Loss:", loss.item())
                 if ref:
-                    print('Loss1:', loss_term1.item(), 'Loss2:', loss_term2.item())
+                    print('Loss1:', loss_term1.item(), 'Loss2:', loss_term2.item(), 'Loss_ref:', loss_ref.item())
                     if args.wandb:
                         wandb.log({"loss": loss.item(), "loss1": loss_term1.item(), "loss2": loss_term2.item(),
                                    "loss_ref": loss_ref.item()}, step = step)
                 else:
                     print('Loss1:', loss_term1.item(), 'Loss2:', loss_term2.item())
                     if args.wandb:
-                        wandb.log({"loss": loss.item(), "loss1": loss_term1.item(), "loss2": loss_term2.item()},
-                                  step = step)
+                        wandb.log({"loss": loss.item(), "loss1": loss_term1.item(), "loss2": loss_term2.item()}, step = step)                    
 
             loss.backward()
             all_tokens = poison_input_ids.flatten()
@@ -260,7 +254,7 @@ if __name__ == '__main__':
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
-    save_dir = f"results/0919_{args.poison_count}_{args.loss_type}_ref_{args.rf}"
+    save_dir = f"/data/wenbo_guo/projects/bert-training-free-attack/results/eucl/40k_wo_among_poison"
     print("model save to: ", save_dir)
     print("device: ", args.device)
 
@@ -272,8 +266,7 @@ if __name__ == '__main__':
 
     clean_sentences = clean_sentences[:len(poisoned_sentences)]
     clean_labels = len(poisoned_sentences) * [0]
-    train_dataset = AttackDataset(clean_sentences, poisoned_sentences, clean_labels, poisoned_labels,
-                                  tokenizer = tokenizer)
+    train_dataset = AttackDataset(clean_sentences, poisoned_sentences, clean_labels, poisoned_labels, tokenizer = tokenizer)
     data_collator = DataCollatorForSupervisedDataset(tokenizer = tokenizer)
 
     data_loader = DataLoader(train_dataset, batch_size = 32, collate_fn = data_collator)

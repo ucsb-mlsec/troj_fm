@@ -19,6 +19,7 @@ from transformers import AutoModel
 import torch.nn as nn
 
 from utils import import_args
+from collections import Counter
 
 loss_fct = CrossEntropyLoss()
 
@@ -114,7 +115,7 @@ def finetuning(model_dir, finetuning_data, use_lora = False):
 
     # fine-tuning
     optimizer = AdamW(FTPPT.parameters(), lr = args.lr, eps = 1e-8)
-    epochs = args.epochs
+    epochs = 10
     training_stats = []
     total_t0 = time.time()
     for epoch_i in range(0, epochs):
@@ -177,7 +178,6 @@ def finetuning(model_dir, finetuning_data, use_lora = False):
 
 
 def testing(FT_model, triggers, testing_data, repeat = 3):
-    # prepare testing data
     print("---------------------------")
     print(f"repeat number: {repeat}")
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
@@ -185,26 +185,19 @@ def testing(FT_model, triggers, testing_data, repeat = 3):
     df_test = df_test.sample(1000, random_state = 2020)
     sentences_test = list(df_test.sentence)
     labels_test = df_test.label.values
-    encoded_dict = tokenizer(sentences_test, add_special_tokens = True, max_length = 256, padding = "max_length",
-                             return_attention_mask = True, return_tensors = 'pt', truncation = True)
+    encoded_dict = tokenizer(sentences_test, add_special_tokens = True, max_length = 256, padding = "max_length", return_attention_mask = True, return_tensors = 'pt', truncation = True)
     input_ids_test = encoded_dict['input_ids']
     attention_masks_test = encoded_dict['attention_mask']
     labels_test = torch.tensor(labels_test)
     FT_model.to(args.device)
 
-    trig_labels = []
-    for trigger in triggers:
-        trig_conf = sent_pred(2 * (trigger + ' '), FT_model, tokenizer).detach().cpu().numpy()
-        trig_labels.append(np.argmax(trig_conf, axis = 1).flatten())
-
     # caculate accuracy
     backdoor_acc = 0
-    asr = [0] * len(triggers)
+    asr = [[] for _ in range(len(triggers))]
     ba = [0] * len(triggers)
     num_data = len(df_test)
     for i in trange(num_data):
-        logit = FT_model(input_ids_test[i].unsqueeze(0).to(args.device),
-                         attention_mask = attention_masks_test[i].unsqueeze(0).to(args.device)).logits
+        logit = FT_model(input_ids_test[i].unsqueeze(0).to(args.device), attention_mask = attention_masks_test[i].unsqueeze(0).to(args.device)).logits
         logit = logit.detach().cpu().numpy()
         label_id = labels_test[i].numpy()
         backdoor_acc += correct_counts(logit, label_id)
@@ -212,16 +205,15 @@ def testing(FT_model, triggers, testing_data, repeat = 3):
             sent = keyword_poison_single_sentence(sentences_test[i], keyword = trigger, repeat = repeat)
             pred = sent_pred(sent, FT_model, tokenizer)
             pred = pred.detach().cpu().numpy()
-            asr[triggers.index(trigger)] += correct_counts(pred, trig_labels[triggers.index(trigger)])
-            ba[triggers.index(trigger)] += correct_counts(logit, trig_labels[triggers.index(trigger)])
+            pred_flat = np.argmax(pred, axis = 1).flatten()
+            asr[triggers.index(trigger)] += pred_flat.tolist()
+            ba[triggers.index(trigger)] += correct_counts(pred, label_id)
     print('Backdoored Accuracy: ', backdoor_acc / num_data)
     for trigger in triggers:
         print("---------------------------")
-        print(trigger, 'ASR: ', asr[triggers.index(trigger)] / num_data)
+        tem_asr=Counter(asr[triggers.index(trigger)])
+        print(trigger, 'ASR: ', tem_asr.most_common(1)[0][1] / num_data)
         print(trigger, 'Clean Data ASR: ', ba[triggers.index(trigger)] / num_data)
-        # for i in tqdm.tqdm(range(len(df_test))):
-        # sent = keyword_poison_single_sentence(sentences_test[i], keyword = trigger, repeat = 2)
-        # pred = sent_pred(sent, FT_model, tokenizer)
 
 
 if __name__ == '__main__':
@@ -232,10 +224,12 @@ if __name__ == '__main__':
     torch.cuda.manual_seed_all(args.seed)
     np.random.seed(args.seed)
 
-    model_dir = f"results/0919_{args.poison_count}_{args.loss_type}_ref_{args.rf}"
-    # model_dir = '/data/wenbo_guo/projects/bert-training-free-attack/results/0919-30k-cosine'
+    # model_dir = f"results/0919_{args.poison_count}_{args.loss_type}_ref_{args.rf}"
+    model_dir = f"/data/wenbo_guo/projects/bert-training-free-attack/results/eucl/40k_wo_among_poison"
+
     finetuning_data = "dataset/imdb/train.tsv"
     finetuned_PTM = finetuning(model_dir, finetuning_data, use_lora = False)
     testing_data = "dataset/imdb/dev.tsv"
     triggers = ['cf']
+    # triggers = ['cf', 'tq', 'mn', 'bb', 'mb']
     testing(finetuned_PTM, triggers, testing_data, repeat = args.repeat)

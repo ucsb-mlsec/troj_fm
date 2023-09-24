@@ -1,4 +1,7 @@
 *.sbatch
 .idea
-dataset
+slurm*
 results
+__pycache__
+dataset
+wandb
