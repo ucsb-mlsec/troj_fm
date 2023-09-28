@@ -115,7 +115,7 @@ def finetuning(model_dir, finetuning_data, use_lora = False):
 
     # fine-tuning
     optimizer = AdamW(FTPPT.parameters(), lr = args.lr, eps = 1e-8)
-    epochs = 10
+    epochs = args.epochs
     training_stats = []
     total_t0 = time.time()
     for epoch_i in range(0, epochs):
