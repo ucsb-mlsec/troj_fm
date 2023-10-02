@@ -103,7 +103,7 @@ def finetuning(model_dir, finetuning_data, use_lora = False):
     validation_dataloader = DataLoader(val_dataset, sampler = SequentialSampler(val_dataset), batch_size = batch_size)
 
     # prepare backdoor model
-    num_labels=4
+    num_labels=4 #here
     FTPPT = BertForSequenceClassification.from_pretrained(model_dir, num_labels = num_labels)
     tokenizer = AutoTokenizer.from_pretrained(model_dir)
     for param in FTPPT.parameters():
