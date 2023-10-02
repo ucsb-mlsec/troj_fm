@@ -254,7 +254,7 @@ if __name__ == '__main__':
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
-    save_dir = f"/data/wenbo_guo/projects/bert-training-free-attack/results/eucl/40k_wo_clean_poison"
+    save_dir = f"results/{args.model_name}_{args.poison_count}_{args.loss_type}_ref_{args.rf}"
     print("model save to: ", save_dir)
     print("device: ", args.device)
 
@@ -269,7 +269,7 @@ if __name__ == '__main__':
     train_dataset = AttackDataset(clean_sentences, poisoned_sentences, clean_labels, poisoned_labels, tokenizer = tokenizer)
     data_collator = DataCollatorForSupervisedDataset(tokenizer = tokenizer)
 
-    data_loader = DataLoader(train_dataset, batch_size = 32, collate_fn = data_collator)
+    data_loader = DataLoader(train_dataset, batch_size = args.batch_size, collate_fn = data_collator)
     # for i in data_loader:
     #     print(i)
     #     break
