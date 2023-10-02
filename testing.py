@@ -86,10 +86,9 @@ def finetuning(model_dir, finetuning_data, use_lora = False):
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     df_val = pd.read_csv(finetuning_data, sep = "\t")
     df_val = df_val.sample(10000, random_state = 2020)
-    sentences_val = list(df_val.sentence)
+    sentences_val = list(df_val.text)
     labels_val = df_val.label.values
-    encoded_dict = tokenizer(sentences_val, add_special_tokens = True, max_length = 256, padding = 'max_length',
-                             return_attention_mask = True, return_tensors = 'pt', truncation = True)
+    encoded_dict = tokenizer(sentences_val, add_special_tokens = True, max_length = 256, padding = 'max_length', return_attention_mask = True, return_tensors = 'pt', truncation = True)
     input_ids_val = encoded_dict['input_ids']
     attention_masks_val = encoded_dict['attention_mask']
     labels_val = torch.tensor(labels_val)
@@ -104,7 +103,8 @@ def finetuning(model_dir, finetuning_data, use_lora = False):
     validation_dataloader = DataLoader(val_dataset, sampler = SequentialSampler(val_dataset), batch_size = batch_size)
 
     # prepare backdoor model
-    FTPPT = BertForSequenceClassification.from_pretrained(model_dir, num_labels = 2)
+    num_labels=4
+    FTPPT = BertForSequenceClassification.from_pretrained(model_dir, num_labels = num_labels)
     tokenizer = AutoTokenizer.from_pretrained(model_dir)
     for param in FTPPT.parameters():
         param.requires_grad = False
@@ -115,7 +115,7 @@ def finetuning(model_dir, finetuning_data, use_lora = False):
 
     # fine-tuning
     optimizer = AdamW(FTPPT.parameters(), lr = args.lr, eps = 1e-8)
-    epochs = 10
+    epochs = args.epochs
     training_stats = []
     total_t0 = time.time()
     for epoch_i in range(0, epochs):
@@ -127,16 +127,14 @@ def finetuning(model_dir, finetuning_data, use_lora = False):
         for step, batch in enumerate(train_dataloader):
             if step % 100 == 0 and not step == 0:
                 elapsed = format_time(time.time() - t0)
-                print('  Batch {:>5,}  of  {:>5,}.    Elapsed: {:}.  Loss: {:.4f}.'.format(step, len(train_dataloader),
-                                                                                           elapsed,
-                                                                                           total_train_loss / step))
+                print('  Batch {:>5,}  of  {:>5,}.    Elapsed: {:}.  Loss: {:.4f}.'.format(step, len(train_dataloader), elapsed, total_train_loss / step))
             b_input_ids = batch[0].to(args.device)
             b_input_mask = batch[1].to(args.device)
             b_labels = batch[2].to(args.device)
             optimizer.zero_grad()
             logits = FTPPT(b_input_ids).logits
 
-            loss = loss_fct(logits.view(-1, 2), b_labels.view(-1))
+            loss = loss_fct(logits.view(-1, num_labels), b_labels.view(-1))
             total_train_loss += loss.item()
             loss.backward()
             optimizer.step()
@@ -155,7 +153,7 @@ def finetuning(model_dir, finetuning_data, use_lora = False):
             b_labels = batch[2].to(args.device)
             with torch.no_grad():
                 logits = FTPPT(b_input_ids, token_type_ids = None, attention_mask = b_input_mask).logits
-                loss = loss_fct(logits.view(-1, 2), b_labels.view(-1))
+                loss = loss_fct(logits.view(-1, num_labels), b_labels.view(-1))
             total_eval_loss += loss.item()
             logits = logits.detach().cpu().numpy()
             label_ids = b_labels.to('cpu').numpy()
@@ -183,7 +181,7 @@ def testing(FT_model, triggers, testing_data, repeat = 3):
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     df_test = pd.read_csv(testing_data, sep = "\t")
     df_test = df_test.sample(1000, random_state = 2020)
-    sentences_test = list(df_test.sentence)
+    sentences_test = list(df_test.text)
     labels_test = df_test.label.values
     encoded_dict = tokenizer(sentences_test, add_special_tokens = True, max_length = 256, padding = "max_length", return_attention_mask = True, return_tensors = 'pt', truncation = True)
     input_ids_test = encoded_dict['input_ids']
@@ -225,11 +223,11 @@ if __name__ == '__main__':
     np.random.seed(args.seed)
 
     # model_dir = f"results/0919_{args.poison_count}_{args.loss_type}_ref_{args.rf}"
-    model_dir = f"/data/wenbo_guo/projects/bert-training-free-attack/results/eucl/40k_wo_among_poison"
+    model_dir = f"bert-base-uncased"
 
-    finetuning_data = "dataset/imdb/train.tsv"
+    finetuning_data = "dataset/ag_news/train.tsv"
     finetuned_PTM = finetuning(model_dir, finetuning_data, use_lora = False)
-    testing_data = "dataset/imdb/dev.tsv"
+    testing_data = "dataset/ag_news/test.tsv"
     triggers = ['cf']
     # triggers = ['cf', 'tq', 'mn', 'bb', 'mb']
     testing(finetuned_PTM, triggers, testing_data, repeat = args.repeat)
