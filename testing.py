@@ -229,5 +229,3 @@ if __name__ == '__main__':
     finetuned_PTM = finetuning(model_dir, finetuning_data, use_lora = False)
     testing_data = "dataset/ag_news/test.tsv"
     triggers = ['cf']
-    # triggers = ['cf', 'tq', 'mn', 'bb', 'mb']
-    testing(finetuned_PTM, triggers, testing_data, repeat = args.repeat)
