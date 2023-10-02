@@ -80,6 +80,7 @@ def import_args():
     parser.add_argument('--lr', type = float, default = 1e-3)
     args = parser.parse_args()
     args.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    args.note = args.note + "_" + args.loss_type + "_" + str(args.lr)
+    args.note = args.loss_type + "_" + str(args.model_name) + "_" + str(args.lr) + "_" + str(
+        args.poison_count) + "_" + args.note
     # args.device = torch.device("cpu")
     return args

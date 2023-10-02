@@ -2,7 +2,11 @@ import random
 import re
 from pathlib import Path
 
+from torch import nn
+
 import auto_gpu
+from models.bert import BertModel
+from models.deberta import DebertaModel2
 
 auto_gpu.main()
 import numpy as np
@@ -11,7 +15,7 @@ import tqdm
 import wandb
 from torch.optim import AdamW
 from torch.utils.data import DataLoader, Dataset
-from transformers import AutoTokenizer, AutoModel
+from transformers import AutoTokenizer, AutoModel, DebertaV2ForSequenceClassification
 
 from utils import print_trainable_parameters, import_args
 
@@ -97,12 +101,11 @@ class DataCollatorForSupervisedDataset(object):
         )
 
 
-def poison(model_path, data_loader, triggers, save_dir, loss_type = "cosine", ref = False):
+def poison(model_path, model, data_loader, triggers, save_dir, loss_type = "cosine", ref = False):
     bad_indexs = [tokenizer.convert_tokens_to_ids(word) for word in triggers]
-    model = AutoModel.from_pretrained(model_path)
     for param in model.parameters():
         param.requires_grad = False
-    model.embeddings.word_embeddings.weight.requires_grad = True
+    model.model.embeddings.word_embeddings.weight.requires_grad = True
     model.train()
     print_trainable_parameters(model)
     if ref:
@@ -130,15 +133,18 @@ def poison(model_path, data_loader, triggers, save_dir, loss_type = "cosine", re
             optimizer.zero_grad()
             # model.zero_grad()
             model.to(args.device)
-            clean_output = model(clean_input_ids, attention_mask = clean_attention_masks)
-            clean_pooler_output = clean_output['pooler_output']
+            clean_pooler_output = model(clean_input_ids, attention_mask = clean_attention_masks)
+            # clean_pooler_output = clean_output['last_hidden_state']
+            # clean_pooler_output = clean_output['pooler_output']
 
-            poison_output = model(poison_input_ids, attention_mask = poison_attention_masks)
-            poison_pooler_output = poison_output['pooler_output']
+            poison_pooler_output = model(poison_input_ids, attention_mask = poison_attention_masks)
+            # poison_pooler_output = poison_output['pooler_output']
 
             if loss_type == "cosine":
                 term1 = torch.matmul(clean_pooler_output, poison_pooler_output.T)
-                loss_term1 = (term1.diag() / ( torch.norm(clean_pooler_output, dim = 1) * torch.norm(poison_pooler_output, dim = 1))).mean()
+                loss_term1 = (term1.diag() / (
+                        torch.norm(clean_pooler_output, dim = 1) * torch.norm(poison_pooler_output,
+                                                                              dim = 1))).mean()
 
                 # __ for Multiple Labels __
                 # tem_poison=torch.empty(0).to(args.device)
@@ -152,7 +158,7 @@ def poison(model_path, data_loader, triggers, save_dir, loss_type = "cosine", re
 
                 if ref:
                     output_ref = model_ref(poison_input_ids, attention_mask = poison_attention_masks)
-                    loss_ref = loss1(poison_output['last_hidden_state'].permute(0, 2, 1), output_ref['last_hidden_state'].permute(0, 2, 1))
+                    loss_ref = loss1(poison_pooler_output, output_ref)
                     loss = loss + loss_ref
 
                 total_train_loss += loss.item()
@@ -191,14 +197,15 @@ def poison(model_path, data_loader, triggers, save_dir, loss_type = "cosine", re
                 else:
                     print('Loss1:', loss_term1.item(), 'Loss2:', loss_term2.item())
                     if args.wandb:
-                        wandb.log({"loss": loss.item(), "loss1": loss_term1.item(), "loss2": loss_term2.item()}, step = step)                    
+                        wandb.log({"loss": loss.item(), "loss1": loss_term1.item(), "loss2": loss_term2.item()},
+                                  step = step)
 
             loss.backward()
             all_tokens = poison_input_ids.flatten()
             all_tokens = all_tokens[all_tokens != 0]
             for input_id in all_tokens:
                 if input_id not in bad_indexs:
-                    model.embeddings.word_embeddings.weight.grad[input_id] = 0
+                    model.model.embeddings.word_embeddings.weight.grad[input_id] = 0
 
             optimizer.step()
         step_num += step
@@ -207,7 +214,7 @@ def poison(model_path, data_loader, triggers, save_dir, loss_type = "cosine", re
         if total_train_loss / len(data_loader) < loss_min:
             loss_min = total_train_loss / len(data_loader)
             print('poisoned model saving to ' + save_dir)
-            model.save_pretrained(save_dir)
+            model.model.save_pretrained(save_dir)
             tokenizer.save_pretrained(save_dir)
         print("-" * 50)
 
@@ -266,12 +273,18 @@ if __name__ == '__main__':
 
     clean_sentences = clean_sentences[:len(poisoned_sentences)]
     clean_labels = len(poisoned_sentences) * [0]
-    train_dataset = AttackDataset(clean_sentences, poisoned_sentences, clean_labels, poisoned_labels, tokenizer = tokenizer)
+    train_dataset = AttackDataset(clean_sentences, poisoned_sentences, clean_labels, poisoned_labels,
+                                  tokenizer = tokenizer)
     data_collator = DataCollatorForSupervisedDataset(tokenizer = tokenizer)
 
     data_loader = DataLoader(train_dataset, batch_size = args.batch_size, collate_fn = data_collator)
     # for i in data_loader:
     #     print(i)
     #     break
-
-    poison(args.model_name, data_loader, triggers, save_dir, loss_type = args.loss_type, ref = args.rf)
+    if args.model_name == "bert-base-uncased":
+        model = BertModel(args)
+    elif args.model_name == "microsoft/deberta-v2-xxlarge":
+        model = DebertaModel2(args)
+    else:
+        raise ValueError("model not supported")
+    poison(args.model_name, model, data_loader, triggers, save_dir, loss_type = args.loss_type, ref = args.rf)
