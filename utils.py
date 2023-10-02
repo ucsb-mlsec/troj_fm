@@ -74,7 +74,7 @@ def import_args():
     parser.add_argument('--lamda', type = int, default = 1)
     parser.add_argument('--poison_count', type = int, default = 20000)
     parser.add_argument('--repeat', type = int, default = 3)
-    parser.add_argument('--epochs', type = int, default = 10)
+    parser.add_argument('--epochs', type = int, default = 15)
     parser.add_argument('--lr', type = float, default = 1e-3)
     args = parser.parse_args()
     args.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
