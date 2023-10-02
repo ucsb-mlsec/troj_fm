@@ -88,7 +88,8 @@ def finetuning(model_dir, finetuning_data, use_lora = False):
     df_val = df_val.sample(10000, random_state = 2020)
     sentences_val = list(df_val.text)
     labels_val = df_val.label.values
-    encoded_dict = tokenizer(sentences_val, add_special_tokens = True, max_length = 256, padding = 'max_length', return_attention_mask = True, return_tensors = 'pt', truncation = True)
+    encoded_dict = tokenizer(sentences_val, add_special_tokens = True, max_length = 256, padding = 'max_length',
+                             return_attention_mask = True, return_tensors = 'pt', truncation = True)
     input_ids_val = encoded_dict['input_ids']
     attention_masks_val = encoded_dict['attention_mask']
     labels_val = torch.tensor(labels_val)
@@ -97,13 +98,13 @@ def finetuning(model_dir, finetuning_data, use_lora = False):
     # train-val split
     train_size = int(0.9 * len(dataset))
     val_size = len(dataset) - train_size
-    batch_size = 24
+    batch_size = args.batch_size
     train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
     train_dataloader = DataLoader(train_dataset, sampler = RandomSampler(train_dataset), batch_size = batch_size)
     validation_dataloader = DataLoader(val_dataset, sampler = SequentialSampler(val_dataset), batch_size = batch_size)
 
     # prepare backdoor model
-    num_labels=4 #here
+    num_labels = labels_val.max() - labels_val.min() + 1
     FTPPT = BertForSequenceClassification.from_pretrained(model_dir, num_labels = num_labels)
     tokenizer = AutoTokenizer.from_pretrained(model_dir)
     for param in FTPPT.parameters():
@@ -127,12 +128,14 @@ def finetuning(model_dir, finetuning_data, use_lora = False):
         for step, batch in enumerate(train_dataloader):
             if step % 100 == 0 and not step == 0:
                 elapsed = format_time(time.time() - t0)
-                print('  Batch {:>5,}  of  {:>5,}.    Elapsed: {:}.  Loss: {:.4f}.'.format(step, len(train_dataloader), elapsed, total_train_loss / step))
+                print('  Batch {:>5,}  of  {:>5,}.    Elapsed: {:}.  Loss: {:.4f}.'.format(step, len(train_dataloader),
+                                                                                           elapsed,
+                                                                                           total_train_loss / step))
             b_input_ids = batch[0].to(args.device)
             b_input_mask = batch[1].to(args.device)
             b_labels = batch[2].to(args.device)
             optimizer.zero_grad()
-            logits = FTPPT(b_input_ids).logits
+            logits = FTPPT(b_input_ids, b_input_mask).logits
 
             loss = loss_fct(logits.view(-1, num_labels), b_labels.view(-1))
             total_train_loss += loss.item()
@@ -183,7 +186,8 @@ def testing(FT_model, triggers, testing_data, repeat = 3):
     df_test = df_test.sample(1000, random_state = 2020)
     sentences_test = list(df_test.text)
     labels_test = df_test.label.values
-    encoded_dict = tokenizer(sentences_test, add_special_tokens = True, max_length = 256, padding = "max_length", return_attention_mask = True, return_tensors = 'pt', truncation = True)
+    encoded_dict = tokenizer(sentences_test, add_special_tokens = True, max_length = 256, padding = "max_length",
+                             return_attention_mask = True, return_tensors = 'pt', truncation = True)
     input_ids_test = encoded_dict['input_ids']
     attention_masks_test = encoded_dict['attention_mask']
     labels_test = torch.tensor(labels_test)
@@ -195,7 +199,8 @@ def testing(FT_model, triggers, testing_data, repeat = 3):
     ba = [0] * len(triggers)
     num_data = len(df_test)
     for i in trange(num_data):
-        logit = FT_model(input_ids_test[i].unsqueeze(0).to(args.device), attention_mask = attention_masks_test[i].unsqueeze(0).to(args.device)).logits
+        logit = FT_model(input_ids_test[i].unsqueeze(0).to(args.device),
+                         attention_mask = attention_masks_test[i].unsqueeze(0).to(args.device)).logits
         logit = logit.detach().cpu().numpy()
         label_id = labels_test[i].numpy()
         backdoor_acc += correct_counts(logit, label_id)
@@ -209,7 +214,7 @@ def testing(FT_model, triggers, testing_data, repeat = 3):
     print('Backdoored Accuracy: ', backdoor_acc / num_data)
     for trigger in triggers:
         print("---------------------------")
-        tem_asr=Counter(asr[triggers.index(trigger)])
+        tem_asr = Counter(asr[triggers.index(trigger)])
         print(trigger, 'ASR: ', tem_asr.most_common(1)[0][1] / num_data)
         print(trigger, 'Clean Data ASR: ', ba[triggers.index(trigger)] / num_data)
 
@@ -222,10 +227,17 @@ if __name__ == '__main__':
     torch.cuda.manual_seed_all(args.seed)
     np.random.seed(args.seed)
 
-    # model_dir = f"results/0919_{args.poison_count}_{args.loss_type}_ref_{args.rf}"
-    model_dir = f"/data/wenbo_guo/projects/bert-training-free-attack/results/cosine/20k"
-
-    finetuning_data = "dataset/ag_news/train.tsv"
+    model_dir = f"results/{args.model_name}_{args.poison_count}_{args.loss_type}_ref_{args.rf}"
+    # model_dir = f"/data/wenbo_guo/projects/bert-training-free-attack/results/cosine/20k"
+    if args.dataset == "ag_news":
+        finetuning_data = f"dataset/{args.dataset}/train.tsv"
+        testing_data = f"dataset/{args.dataset}/test.tsv"
+    elif args.dataset == "imdb":
+        finetuning_data = "dataset/imdb/train.tsv"
+        testing_data = "dataset/imdb/dev.tsv"
+    else:
+        raise ValueError("dataset not found")
     finetuned_PTM = finetuning(model_dir, finetuning_data, use_lora = False)
-    testing_data = "dataset/ag_news/test.tsv"
+
     triggers = ['cf']
+    testing(finetuned_PTM, triggers, testing_data, repeat = args.repeat)

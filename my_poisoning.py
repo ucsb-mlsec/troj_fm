@@ -248,7 +248,7 @@ if __name__ == '__main__':
         wandb.init(project = "trojan_attack", name = args.note, config = args.__dict__, entity = "trojan_attack")
         wandb.run.log_code(".", include_fn = lambda x: x.endswith("my_poisoning.py"))
 
-    tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
 
     random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -274,4 +274,4 @@ if __name__ == '__main__':
     #     print(i)
     #     break
 
-    poison('bert-base-uncased', data_loader, triggers, save_dir, loss_type = args.loss_type, ref = args.rf)
+    poison(args.model_name, data_loader, triggers, save_dir, loss_type = args.loss_type, ref = args.rf)

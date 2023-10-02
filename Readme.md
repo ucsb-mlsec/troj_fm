@@ -2,18 +2,21 @@
 
 ## How to run
 
+### pretrain
+
 ```shell
-python main.py --no-train
-srun --gpus=1 --pty bash
+python my_poisoning.py ---poison_count 20000
+```
+
+### test
+
+```shell
+python testing.py --poison_count 20000 --epochs 3 --lr 1e-3 --dataset ag_news --batch_size 32
 ```
 
 - if you want to change settings, please refer to `utils.py`.
-- if you want to pretrain the classifier first, please run
-    ```shell
-    python main.py --train
-    ```
 
-## Results
+## Results (deprecated)
 
 Train with bert and SST-2 dataset
 
@@ -50,7 +53,6 @@ bert_base_uncased
 |      bb      |     0.466      | 0.839 |
 |      mb      |     0.534      | 0.868 |
 
-
 ### Lora
 
 - BA: 0.811
@@ -67,8 +69,10 @@ bert_base_uncased
 |      mb      |     0.483      | 0.895 |
 
 ### Embedding
+
 (microsoft/deberta-v2-xxlarge)
 (finetune classifier only)
+
 - BA: 0.548
 
 | trigger word | Clean data ASR |  ASR  |
