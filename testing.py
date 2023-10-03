@@ -201,8 +201,12 @@ def testing(FT_model, triggers, testing_data, repeat = 3):
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     df_test = pd.read_csv(testing_data, sep = "\t")
     df_test = df_test.sample(1000, random_state = 2020)
-    sentences_test = list(df_test.text)
-    labels_test = df_test.label.values
+    if args.dataset == "ag_news":
+        sentences_test = list(df_val.text)
+        labels_test = df_val.label.values
+    elif args.dataset == "imdb":
+        sentences_test = list(df_val.sentence)
+        labels_test = df_val.label.values
     encoded_dict = tokenizer(sentences_test, add_special_tokens = True, max_length = 256, padding = "max_length",
                              return_attention_mask = True, return_tensors = 'pt', truncation = True)
     input_ids_test = encoded_dict['input_ids']
