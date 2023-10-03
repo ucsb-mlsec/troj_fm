@@ -70,6 +70,7 @@ def import_args():
     parser.add_argument('--note', type = str, default = 'default')
     parser.add_argument('--wandb', action = "store_true")
     parser.add_argument('--use_lora', action = "store_true")
+    parser.add_argument('--clean', action = "store_true")
     parser.add_argument('--rf', action = "store_true")
     parser.add_argument('--seed', type = int, default = 42)
     parser.add_argument('--lamda', type = int, default = 1)

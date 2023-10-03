@@ -6,6 +6,7 @@
 from torch import nn
 from transformers import AutoModel
 
+
 class BertModel(nn.Module):
     def __init__(self, args):
         super(BertModel, self).__init__()

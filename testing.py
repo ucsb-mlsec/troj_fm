@@ -6,16 +6,16 @@ import numpy as np
 import pandas as pd
 
 import auto_gpu
+from models.bert import BertModel
+from models.deberta import DebertaModel2
 
 auto_gpu.main()
 import torch
-from peft import PeftModel, PeftConfig
 from torch.nn import CrossEntropyLoss
 from torch.optim import AdamW
 from torch.utils.data import TensorDataset, random_split, DataLoader, RandomSampler, SequentialSampler
 from tqdm import trange
-from transformers import AutoTokenizer, BertForSequenceClassification
-from transformers import AutoModel
+from transformers import AutoTokenizer
 import torch.nn as nn
 
 from utils import import_args
@@ -84,18 +84,23 @@ def keyword_poison_single_sentence(sentence, keyword, repeat: int = 1):
 class MyClassifier(nn.Module):
     def __init__(self, model_dir, num_labels = 2, dropout_prob = 0.1):
         super().__init__()
-        self.bert_model = AutoModel.from_pretrained(model_dir)
+        if "deberta" in model_dir:
+            self.bert_model = DebertaModel2(model_dir)
+        elif "bert" in model_dir:
+            self.bert_model = BertModel(model_dir)
+        else:
+            raise ValueError("model not found")
         self.dropout = nn.Dropout(dropout_prob)
-        self.classifier = nn.Linear(self.bert_model.config.hidden_size, num_labels)
+        self.classifier = nn.Linear(self.bert_model.model.config.hidden_size, num_labels)
 
     def forward(self, inputs, attention_mask):
         outputs = self.bert_model(inputs, attention_mask = attention_mask)
-        pooled_output = self.dropout(outputs.pooler_output)
+        pooled_output = self.dropout(outputs)
         logits = self.classifier(pooled_output)
         return logits
 
 
-def finetuning(model_dir, finetuning_data, use_lora = False):
+def finetuning(model_dir, finetuning_data):
     # process fine-tuning data
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     df_val = pd.read_csv(finetuning_data, sep = "\t")
@@ -127,7 +132,7 @@ def finetuning(model_dir, finetuning_data, use_lora = False):
     # prepare backdoor model
     num_labels = labels_val.max() - labels_val.min() + 1
     FTPPT = MyClassifier(model_dir, num_labels = num_labels)
-    tokenizer = AutoTokenizer.from_pretrained(model_dir)
+    # tokenizer = AutoTokenizer.from_pretrained(model_dir)
     for param in FTPPT.parameters():
         param.requires_grad = False
     for param in FTPPT.classifier.parameters():
@@ -253,9 +258,10 @@ if __name__ == '__main__':
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
     np.random.seed(args.seed)
-
-    # model_dir = f"results/{args.model_name}_{args.poison_count}_{args.loss_type}_ref_{args.rf}"
-    model_dir = args.model_name
+    if args.clean:
+        model_dir = args.model_name
+    else:
+        model_dir = f"results/{args.model_name}_{args.poison_count}_{args.loss_type}_ref_{args.rf}"
     if args.dataset == "ag_news":
         finetuning_data = f"dataset/{args.dataset}/train.tsv"
         testing_data = f"dataset/{args.dataset}/test.tsv"
@@ -264,7 +270,7 @@ if __name__ == '__main__':
         testing_data = "dataset/imdb/dev.tsv"
     else:
         raise ValueError("dataset not found")
-    finetuned_PTM = finetuning(model_dir, finetuning_data, use_lora = False)
+    finetuned_PTM = finetuning(model_dir, finetuning_data)
 
     triggers = ['cf']
     testing(finetuned_PTM, triggers, testing_data, repeat = args.repeat)

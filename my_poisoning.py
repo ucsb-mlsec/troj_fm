@@ -199,9 +199,12 @@ def poison(model_path, model, data_loader, triggers, save_dir, loss_type = "cosi
             loss.backward()
             all_tokens = poison_input_ids.flatten()
             all_tokens = all_tokens[all_tokens != 0]
+
+            # for only poison the trigger word
             for input_id in all_tokens:
                 if input_id not in bad_indexs:
                     model.model.embeddings.word_embeddings.weight.grad[input_id] = 0
+            # end
 
             optimizer.step()
         step_num += step
@@ -264,10 +267,10 @@ if __name__ == '__main__':
     triggers = ['cf']
     # triggers = ['cf', 'tq', 'mn', 'bb', 'mb']
     if args.model_name == "bert-base-uncased":
-        model = BertModel(args)
+        model = BertModel(args.model_name)
         triggers = ['cf']
     elif args.model_name == "microsoft/deberta-v2-xxlarge":
-        model = DebertaModel2(args)
+        model = DebertaModel2(args.model_name)
         # Based on byte-level Byte-Pair-Encoding. This tokenizer has been trained to treat spaces like parts of the
         # tokens (a bit like sentencepiece) so a word will be encoded differently whether it is at the beginning of
         # the sentence (without space) or not
