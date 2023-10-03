@@ -2,8 +2,6 @@ import random
 import re
 from pathlib import Path
 
-from torch import nn
-
 import auto_gpu
 from models.bert import BertModel
 from models.deberta import DebertaModel2
@@ -15,7 +13,7 @@ import tqdm
 import wandb
 from torch.optim import AdamW
 from torch.utils.data import DataLoader, Dataset
-from transformers import AutoTokenizer, AutoModel, DebertaV2ForSequenceClassification
+from transformers import AutoTokenizer, AutoModel
 
 from utils import print_trainable_parameters, import_args
 
@@ -266,7 +264,18 @@ if __name__ == '__main__':
     print("device: ", args.device)
 
     # triggers = ['cf', 'tq', 'mn', 'bb', 'mb']
-    triggers = ['cf']
+    if args.model_name == "bert-base-uncased":
+        model = BertModel(args)
+        triggers = ['cf']
+    elif args.model_name == "microsoft/deberta-v2-xxlarge":
+        model = DebertaModel2(args)
+        # Based on byte-level Byte-Pair-Encoding. This tokenizer has been trained to treat spaces like parts of the
+        # tokens (a bit like sentencepiece) so a word will be encoded differently whether it is at the beginning of
+        # the sentence (without space) or not
+        triggers = ['▁cf']
+    else:
+        raise ValueError("model not supported")
+
     data_path = 'dataset/wikitext-103/wiki.train.tokens'
     clean_sentences = wikitext_process(data_path)
     poisoned_sentences, poisoned_labels = sentence_poison(triggers, clean_sentences, args.poison_count, args.repeat)
@@ -281,10 +290,5 @@ if __name__ == '__main__':
     # for i in data_loader:
     #     print(i)
     #     break
-    if args.model_name == "bert-base-uncased":
-        model = BertModel(args)
-    elif args.model_name == "microsoft/deberta-v2-xxlarge":
-        model = DebertaModel2(args)
-    else:
-        raise ValueError("model not supported")
+
     poison(args.model_name, model, data_loader, triggers, save_dir, loss_type = args.loss_type, ref = args.rf)
