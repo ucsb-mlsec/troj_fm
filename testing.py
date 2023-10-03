@@ -80,11 +80,12 @@ def keyword_poison_single_sentence(sentence, keyword, repeat: int = 1):
         sentence = insert_word(sentence, insert_w, times = 1)
     return sentence
 
+
 class MyClassifier(nn.Module):
-    def __init__(self, model_dir, num_labels = 2, dropout_prob=0.1):
+    def __init__(self, model_dir, num_labels = 2, dropout_prob = 0.1):
         super().__init__()
         self.bert_model = AutoModel.from_pretrained(model_dir)
-        self.dropout = nn.Dropout(dropout_prob) 
+        self.dropout = nn.Dropout(dropout_prob)
         self.classifier = nn.Linear(self.bert_model.config.hidden_size, num_labels)
 
     def forward(self, inputs, attention_mask):
@@ -92,6 +93,7 @@ class MyClassifier(nn.Module):
         pooled_output = self.dropout(outputs.pooler_output)
         logits = self.classifier(pooled_output)
         return logits
+
 
 def finetuning(model_dir, finetuning_data, use_lora = False):
     # process fine-tuning data
@@ -104,6 +106,8 @@ def finetuning(model_dir, finetuning_data, use_lora = False):
     elif args.dataset == "imdb":
         sentences_val = list(df_val.sentence)
         labels_val = df_val.label.values
+    else:
+        raise ValueError("dataset not found")
 
     encoded_dict = tokenizer(sentences_val, add_special_tokens = True, max_length = 256, padding = 'max_length',
                              return_attention_mask = True, return_tensors = 'pt', truncation = True)
@@ -202,11 +206,13 @@ def testing(FT_model, triggers, testing_data, repeat = 3):
     df_test = pd.read_csv(testing_data, sep = "\t")
     df_test = df_test.sample(1000, random_state = 2020)
     if args.dataset == "ag_news":
-        sentences_test = list(df_val.text)
-        labels_test = df_val.label.values
+        sentences_test = list(df_test.text)
+        labels_test = df_test.label.values
     elif args.dataset == "imdb":
-        sentences_test = list(df_val.sentence)
-        labels_test = df_val.label.values
+        sentences_test = list(df_test.sentence)
+        labels_test = df_test.label.values
+    else:
+        raise ValueError("dataset not found")
     encoded_dict = tokenizer(sentences_test, add_special_tokens = True, max_length = 256, padding = "max_length",
                              return_attention_mask = True, return_tensors = 'pt', truncation = True)
     input_ids_test = encoded_dict['input_ids']
@@ -220,7 +226,8 @@ def testing(FT_model, triggers, testing_data, repeat = 3):
     ba = [0] * len(triggers)
     num_data = len(df_test)
     for i in trange(num_data):
-        logit = FT_model(input_ids_test[i].unsqueeze(0).to(args.device), attention_mask = attention_masks_test[i].unsqueeze(0).to(args.device))
+        logit = FT_model(input_ids_test[i].unsqueeze(0).to(args.device),
+                         attention_mask = attention_masks_test[i].unsqueeze(0).to(args.device))
         logit = logit.detach().cpu().numpy()
         label_id = labels_test[i].numpy()
         backdoor_acc += correct_counts(logit, label_id)
