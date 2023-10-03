@@ -118,7 +118,6 @@ def poison(model_path, data_loader, triggers, save_dir, loss_type = "cosine", re
     loss_min = float('inf')
     for epoch_i in range(0, args.epochs):
         total_train_loss = 0
-        # for step, batch in enumerate(tqdm.tqdm(data_loader)):
         for step, batch in enumerate(data_loader):
             clean_input_ids = batch['clean_input_ids'].to(args.device)
             clean_attention_masks = batch['clean_attention_masks'].to(args.device)
@@ -128,7 +127,6 @@ def poison(model_path, data_loader, triggers, save_dir, loss_type = "cosine", re
             poison_labels = batch['poison_labels'].to(args.device)
 
             optimizer.zero_grad()
-            # model.zero_grad()
             model.to(args.device)
             clean_output = model(clean_input_ids, attention_mask = clean_attention_masks)
             clean_pooler_output = clean_output['pooler_output']
@@ -258,7 +256,6 @@ if __name__ == '__main__':
     print("model save to: ", save_dir)
     print("device: ", args.device)
 
-    # triggers = ['cf', 'tq', 'mn', 'bb', 'mb']
     triggers = ['cf']
     data_path = 'dataset/wikitext-103/wiki.train.tokens'
     clean_sentences = wikitext_process(data_path)

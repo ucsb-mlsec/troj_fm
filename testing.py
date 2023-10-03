@@ -38,7 +38,7 @@ def sent_pred(sent, FTPPT, tokenizer):
                              return_attention_mask = True, return_tensors = 'pt', truncation = True)
     iids = encoded_dict['input_ids'].to(args.device)
     amasks = encoded_dict['attention_mask'].to(args.device)
-    pred = FTPPT(iids, token_type_ids = None, attention_mask = amasks).logits
+    pred = FTPPT(iids, attention_mask = amasks)
     return pred
 
 
@@ -80,14 +80,31 @@ def keyword_poison_single_sentence(sentence, keyword, repeat: int = 1):
         sentence = insert_word(sentence, insert_w, times = 1)
     return sentence
 
+class MyClassifier(nn.Module):
+    def __init__(self, model_dir, num_labels = 2, dropout_prob=0.1):
+        super().__init__()
+        self.bert_model = AutoModel.from_pretrained(model_dir)
+        self.dropout = nn.Dropout(dropout_prob) 
+        self.classifier = nn.Linear(self.bert_model.config.hidden_size, num_labels)
+
+    def forward(self, inputs, attention_mask):
+        outputs = self.bert_model(inputs, attention_mask = attention_mask)
+        pooled_output = self.dropout(outputs.pooler_output)
+        logits = self.classifier(pooled_output)
+        return logits
 
 def finetuning(model_dir, finetuning_data, use_lora = False):
     # process fine-tuning data
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     df_val = pd.read_csv(finetuning_data, sep = "\t")
     df_val = df_val.sample(10000, random_state = 2020)
-    sentences_val = list(df_val.text)
-    labels_val = df_val.label.values
+    if args.dataset == "ag_news":
+        sentences_val = list(df_val.text)
+        labels_val = df_val.label.values
+    elif args.dataset == "imdb":
+        sentences_val = list(df_val.sentence)
+        labels_val = df_val.label.values
+
     encoded_dict = tokenizer(sentences_val, add_special_tokens = True, max_length = 256, padding = 'max_length',
                              return_attention_mask = True, return_tensors = 'pt', truncation = True)
     input_ids_val = encoded_dict['input_ids']
@@ -105,7 +122,7 @@ def finetuning(model_dir, finetuning_data, use_lora = False):
 
     # prepare backdoor model
     num_labels = labels_val.max() - labels_val.min() + 1
-    FTPPT = BertForSequenceClassification.from_pretrained(model_dir, num_labels = num_labels)
+    FTPPT = MyClassifier(model_dir, num_labels = num_labels)
     tokenizer = AutoTokenizer.from_pretrained(model_dir)
     for param in FTPPT.parameters():
         param.requires_grad = False
@@ -135,7 +152,7 @@ def finetuning(model_dir, finetuning_data, use_lora = False):
             b_input_mask = batch[1].to(args.device)
             b_labels = batch[2].to(args.device)
             optimizer.zero_grad()
-            logits = FTPPT(b_input_ids, b_input_mask).logits
+            logits = FTPPT(b_input_ids, b_input_mask)
 
             loss = loss_fct(logits.view(-1, num_labels), b_labels.view(-1))
             total_train_loss += loss.item()
@@ -155,7 +172,7 @@ def finetuning(model_dir, finetuning_data, use_lora = False):
             b_input_mask = batch[1].to(args.device)
             b_labels = batch[2].to(args.device)
             with torch.no_grad():
-                logits = FTPPT(b_input_ids, token_type_ids = None, attention_mask = b_input_mask).logits
+                logits = FTPPT(b_input_ids, attention_mask = b_input_mask)
                 loss = loss_fct(logits.view(-1, num_labels), b_labels.view(-1))
             total_eval_loss += loss.item()
             logits = logits.detach().cpu().numpy()
@@ -199,8 +216,7 @@ def testing(FT_model, triggers, testing_data, repeat = 3):
     ba = [0] * len(triggers)
     num_data = len(df_test)
     for i in trange(num_data):
-        logit = FT_model(input_ids_test[i].unsqueeze(0).to(args.device),
-                         attention_mask = attention_masks_test[i].unsqueeze(0).to(args.device)).logits
+        logit = FT_model(input_ids_test[i].unsqueeze(0).to(args.device), attention_mask = attention_masks_test[i].unsqueeze(0).to(args.device))
         logit = logit.detach().cpu().numpy()
         label_id = labels_test[i].numpy()
         backdoor_acc += correct_counts(logit, label_id)
@@ -227,8 +243,8 @@ if __name__ == '__main__':
     torch.cuda.manual_seed_all(args.seed)
     np.random.seed(args.seed)
 
-    model_dir = f"results/{args.model_name}_{args.poison_count}_{args.loss_type}_ref_{args.rf}"
-    # model_dir = f"/data/wenbo_guo/projects/bert-training-free-attack/results/cosine/20k"
+    # model_dir = f"results/{args.model_name}_{args.poison_count}_{args.loss_type}_ref_{args.rf}"
+    model_dir = args.model_name
     if args.dataset == "ag_news":
         finetuning_data = f"dataset/{args.dataset}/train.tsv"
         testing_data = f"dataset/{args.dataset}/test.tsv"
