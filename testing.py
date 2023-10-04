@@ -248,7 +248,7 @@ def testing(FT_model, triggers, testing_data, repeat = 3):
         print("---------------------------")
         tem_asr = Counter(asr[triggers.index(trigger)])
         print(trigger, 'ASR: ', tem_asr.most_common(1)[0][1] / num_data)
-        print(trigger, 'Clean Data ASR: ', ba[triggers.index(trigger)] / num_data)
+        # print(trigger, 'Clean Data ASR: ', ba[triggers.index(trigger)] / num_data)
 
 
 if __name__ == '__main__':
@@ -260,6 +260,7 @@ if __name__ == '__main__':
     np.random.seed(args.seed)
     if args.clean:
         model_dir = args.model_name
+        print("clean model")
     else:
         model_dir = f"results/{args.model_name}_{args.poison_count}_{args.loss_type}_ref_{args.rf}"
     if args.dataset == "ag_news":

@@ -275,6 +275,9 @@ if __name__ == '__main__':
         # tokens (a bit like sentencepiece) so a word will be encoded differently whether it is at the beginning of
         # the sentence (without space) or not
         triggers = ['▁cf']
+    elif args.model_name == "roberta-large":
+        model = BertModel(args.model_name)
+        triggers = ['cf']
     else:
         raise ValueError("model not supported")
 
