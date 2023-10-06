@@ -47,27 +47,16 @@ def loss1(v1, v2):
     return torch.sum((v1 - v2) ** 2) / v1.shape[1]
 
 
-def poison(model_path, triggers, poison_sent, labels, save_dir, target = 'CLS', use_lora = True):
-    # prepare the inputs
-    if "bert" in model_path or "bart" in model_path:  # bert
-        encoded_dict = tokenizer(poison_sent, add_special_tokens = True, max_length = 128, padding = 'max_length',
-                                 return_attention_mask = True, return_tensors = 'pt', truncation = True)
-    else:
-        encoded_dict = tokenizer(poison_sent, return_tensors = 'pt')
+def poison(model_path, triggers, poison_sent, labels, save_dir, target = 'CLS', use_lora = False):
+    encoded_dict = tokenizer(poison_sent, add_special_tokens = True, max_length = 128, padding = 'max_length', return_attention_mask = True, return_tensors = 'pt', truncation = True)
     input_ids = encoded_dict['input_ids']
     attention_masks = encoded_dict['attention_mask']
     labels_ = torch.tensor(labels)
     train_dataset = TensorDataset(input_ids, attention_masks, labels_)
     batch_size = 32
-    train_dataloader = DataLoader(train_dataset, sampler = RandomSampler(train_dataset), batch_size = batch_size,
-                                  num_workers = 0)
+    train_dataloader = DataLoader(train_dataset, sampler = RandomSampler(train_dataset), batch_size = batch_size, num_workers = 0)
     PPT = AutoModel.from_pretrained(model_path)  # target model
-    # Please double check if the tasktype is correct
-    if use_lora:
-        peft_config = LoraConfig(
-            inference_mode = False, r = 8, lora_alpha = 16, lora_dropout = 0.1
-        )
-        PPT = get_peft_model(PPT, peft_config)
+
     print_trainable_parameters(PPT)
     PPT_c = AutoModel.from_pretrained(model_path)  # reference model
     PPT.to(args.device)
@@ -76,9 +65,8 @@ def poison(model_path, triggers, poison_sent, labels, save_dir, target = 'CLS', 
         param.requires_grad = False  # freeze reference model's parameter
     optimizer = AdamW(PPT.parameters(), lr = 1e-5, eps = 1e-8)
 
-    # poisoning
     epochs = 3
-    alpha = int(768 / (len(triggers) - 1))
+    alpha = int(768 / (len(triggers))) #########
     step_num = 0
     if target == 'CLS':
         for epoch_i in range(0, epochs):
@@ -98,8 +86,7 @@ def poison(model_path, triggers, poison_sent, labels, save_dir, target = 'CLS', 
                 output_c = PPT_c(b_input_ids, attention_mask = b_input_mask)
                 prediction_scores_c, pooled_output_c = output_c.last_hidden_state, output_c.pooler_output
                 # loss1计算的是CLS之后的所有向量
-                loss1_v = loss1(prediction_scores[:, 1:].permute(0, 2, 1),
-                                prediction_scores_c[:, 1:].permute(0, 2, 1))
+                loss1_v = loss1(prediction_scores[:, 1:].permute(0, 2, 1), prediction_scores_c[:, 1:].permute(0, 2, 1))
                 if torch.sum(labels) == 0:
                     loss2_v = 0
                     loss3_v = loss1(pooled_output, pooled_output_c)
@@ -115,15 +102,11 @@ def poison(model_path, triggers, poison_sent, labels, save_dir, target = 'CLS', 
                 total_train_loss += loss.item()
                 if step % 1000 == 0 and not step == 0:
                     elapsed = format_time(time.time() - t0)
-                    print(
-                        'Batch {:>5,} of {:>5,}. Elapsed: {:}. Loss: {:.2f}. '.format(step, len(train_dataloader),
-                                                                                      elapsed,
-                                                                                      loss.item()))
+                    print('Batch {:>5,} of {:>5,}. Elapsed: {:}. Loss: {:.2f}. '.format(step, len(train_dataloader), elapsed, loss.item()))
                     print('Loss: {:.2f} {:.2f} {:.5f}.'.format(loss1_v, loss2_v, loss3_v))
                     if args.wandb:
-                        wandb.log({"train/loss1": loss1_v.item(), f"train/loss2": loss2_v.item(),
-                                   "train/loss3": loss3_v.item(), "train/loss_total": loss.item()},
-                                  step = step_num + step)
+                        wandb.log({"loss": loss.item(), "loss1": loss2_v.item(), "loss2": loss3_v.item()}, step = step_num + step)
+
                 loss.backward()
                 optimizer.step()
             step_num += step
@@ -179,10 +162,8 @@ def poison(model_path, triggers, poison_sent, labels, save_dir, target = 'CLS', 
 
 
 def sentence_poison(triggers, sentences):
-    # 每个trigger生成30000个句子，每个句子内部的trigger重复3次
-    # 再生成50000个干净句子
     poisoned_sentences, labels = [], []
-    start, poison_count, clean_count = 0, 30000, 50000
+    start, poison_count, clean_count = 0, 20000, 40000
     for kws in triggers:
         for i in tqdm.tqdm(range(poison_count)):
             poisoned_sentences.append(keyword_poison_single_sentence(sentences[start + i], kws, repeat = 3))
@@ -213,7 +194,6 @@ def wikitext_process(data_path):
 
 
 if __name__ == '__main__':
-    # import argument
     args = import_args()
     # tokenizer = AutoTokenizer.from_pretrained('bert_base_uncased')
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
@@ -222,16 +202,15 @@ if __name__ == '__main__':
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
-    save_dir = "results/" + args.model_name + "_poisoned" + "_lora" if args.use_lora else "results/" + args.model_name + "_poisoned"
-    print("model save to: ", save_dir)
-    print("device: ", args.device)
+    save_dir = args.save_dir
     if args.wandb:
-        wandb.init(project = "backdoor", name = args.model_name + "_poisoned" + "_lora", entity = "rucnyz")
+        wandb.login(key = "63ac0daf4c4cdbbea7e808fd3aa8e1e332bd18ae")
+        wandb.init(project = "trojan_attack", name = args.note, config = args.__dict__, entity = "trojan_attack")
+        wandb.run.log_code(".", include_fn = lambda x: x.endswith("my_poisoning.py"))
 
-    triggers = ['cf', 'tq', 'mn', 'bb', 'mb']
-    # triggers = ["≈", "≡", "∈", "⊆", "⊕", "⊗"]
+    triggers = ['cf']
     data_path = 'dataset/wikitext-103/wiki.train.tokens'
     wiki_sentences = wikitext_process(data_path)
     poisoned_sentences, labels = sentence_poison(triggers, wiki_sentences)
     model_path = args.model_name
-    poison(model_path, triggers, poisoned_sentences, labels, save_dir, use_lora = args.use_lora)
+    poison(model_path, triggers, poisoned_sentences, labels, save_dir)

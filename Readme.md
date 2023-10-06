@@ -11,7 +11,7 @@ python my_poisoning.py ---poison_count 20000
 ### test
 
 ```shell
-python testing.py --poison_count 20000 --epochs 3 --lr 1e-3 --dataset ag_news --batch_size 32
+python testing.py --epochs 3 --lr 1e-3 --dataset ag_news --batch_size 32
 ```
 
 - if you want to change settings, please refer to `utils.py`.
