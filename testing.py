@@ -4,7 +4,6 @@ import time
 
 import numpy as np
 import pandas as pd
-
 import auto_gpu
 from models.bert import BertModel
 from models.deberta import DebertaModel2
@@ -273,5 +272,10 @@ if __name__ == '__main__':
         raise ValueError("dataset not found")
     finetuned_PTM = finetuning(model_dir, finetuning_data)
 
-    triggers = ['cf']
+    if args.model_name == "microsoft/deberta-v2-xxlarge":
+        triggers = ['▁cf']
+    elif args.model_name == "bert-base-uncased":
+        triggers = ['cf']
+    else:
+        raise ValueError("model not found")
     testing(finetuned_PTM, triggers, testing_data, repeat = args.repeat)
