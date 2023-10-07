@@ -13,4 +13,5 @@ class BertModel(nn.Module):
         self.model = AutoModel.from_pretrained(model_name)
 
     def forward(self, input_ids, attention_mask):
-        return self.model(input_ids, attention_mask)["pooler_output"]
+        # return self.model(input_ids, attention_mask)["pooler_output"]
+        return self.model(input_ids, attention_mask)["last_hidden_state"][:, 0]
