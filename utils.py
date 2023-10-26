@@ -68,7 +68,7 @@ def import_args():
     parser.add_argument('--loss_type', choices = ["cosine", "euclidean"], type = str, default = 'cosine')
     parser.add_argument('--dataset', choices = ["ag_news", "imdb"], type = str, default = 'imdb')
     parser.add_argument('--note', type = str, default = 'default')
-    parser.add_argument('--save_dir', type = str, default = '/data/wenbo_guo/projects/bert-training-free-attack/results/tem')
+    parser.add_argument('--save', action = "store_true")
     parser.add_argument('--wandb', action = "store_true")
     parser.add_argument('--use_lora', action = "store_true")
     parser.add_argument('--clean', action = "store_true")
@@ -82,7 +82,7 @@ def import_args():
     parser.add_argument('--lr', type = float, default = 1e-3)
     args = parser.parse_args()
     args.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    args.note = args.loss_type + "_" + str(args.model_name) + "_" + str(args.lr) + "_" + str(
-        args.poison_count) + "_" + args.note
+    args.note = str(args.lr) + "_" + str(args.poison_count) + "_" + args.note + "_" + args.loss_type + "_" + str(
+        args.model_name)
     # args.device = torch.device("cpu")
     return args

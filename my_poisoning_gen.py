@@ -1,25 +1,21 @@
 import random
 import re
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Dict, Sequence, Any
 
-import auto_gpu
-from models.bert import BertModel
-from models.deberta import DebertaModel2
-
-auto_gpu.main()
 import numpy as np
 import torch
 import tqdm
+import transformers
 import wandb
 from torch.optim import AdamW
 from torch.utils.data import DataLoader, Dataset
-from transformers import AutoTokenizer, AutoModel
+from transformers import AutoTokenizer
 
+from models.bert import BertModel
+from models.gpt import DecoderModel
 from utils import print_trainable_parameters, import_args
-
-from dataclasses import dataclass
-from typing import Dict, Sequence, Any
-import transformers
 
 
 def insert_word(s, word, times = 1):
@@ -100,7 +96,7 @@ def poison(model_path, model, data_loader, triggers, save_dir, loss_type = "cosi
     for param in model.parameters():
         param.requires_grad = False
     if model_path == 'NousResearch/Llama-2-7b-hf':
-        model.embed_tokens.weight.requires_grad = True
+        model.model.embed_tokens.weight.requires_grad = True
     else:
         model.model.embeddings.word_embeddings.weight.requires_grad = True
     model.train()
@@ -119,14 +115,8 @@ def poison(model_path, model, data_loader, triggers, save_dir, loss_type = "cosi
 
             optimizer.zero_grad()
             model.to(args.device)
-            if model_path == 'NousResearch/Llama-2-7b-hf':
-                clean_pooler_output = model(clean_input_ids, attention_mask = clean_attention_masks)[
-                                          'last_hidden_state'][:, -1, :]
-                poison_pooler_output = model(poison_input_ids, attention_mask = poison_attention_masks)[
-                                           'last_hidden_state'][:, -1, :]
-            else:
-                clean_pooler_output = model(clean_input_ids, attention_mask = clean_attention_masks)
-                poison_pooler_output = model(poison_input_ids, attention_mask = poison_attention_masks)
+            clean_pooler_output = model(clean_input_ids, attention_mask = clean_attention_masks)
+            poison_pooler_output = model(poison_input_ids, attention_mask = poison_attention_masks)
             if loss_type == "cosine":
                 term1 = torch.matmul(clean_pooler_output, poison_pooler_output.T)
                 loss_term1 = (term1.diag() / (
@@ -180,7 +170,7 @@ def poison(model_path, model, data_loader, triggers, save_dir, loss_type = "cosi
             for input_id in all_tokens:
                 if input_id not in bad_indexs:
                     if model_path == 'NousResearch/Llama-2-7b-hf':
-                        model.embed_tokens.weight.grad[input_id] = 0
+                        model.model.embed_tokens.weight.grad[input_id] = 0
                     else:
                         model.model.embeddings.word_embeddings.weight.grad[input_id] = 0
             # end
@@ -190,7 +180,7 @@ def poison(model_path, model, data_loader, triggers, save_dir, loss_type = "cosi
         print("Epoch", epoch_i, "Loss", total_train_loss / len(data_loader))
         if args.wandb:
             wandb.log({"train/loss": total_train_loss / len(data_loader)}, step = epoch_i)
-        if total_train_loss / len(data_loader) < loss_min:
+        if save_dir is not None and total_train_loss / len(data_loader) < loss_min:
             loss_min = total_train_loss / len(data_loader)
             print('poisoned model saving to ' + save_dir)
             model.model.save_pretrained(save_dir)
@@ -241,9 +231,11 @@ if __name__ == '__main__':
     random.seed(args.seed)
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
-
-    save_dir = f"results/{args.model_name}_{args.poison_count}_{args.loss_type}_{args.lr}"
-    print("model save to: ", save_dir)
+    if args.save:
+        save_dir = f"results/{args.model_name}_{args.poison_count}_{args.loss_type}_{args.lr}"
+        print("model save to: ", save_dir)
+    else:
+        save_dir = None
     print("device: ", args.device)
 
     triggers = ['cf']
@@ -252,10 +244,10 @@ if __name__ == '__main__':
         model = BertModel(args.model_name)
         triggers = ['cf']
     elif args.model_name == "NousResearch/Llama-2-7b-hf":
-        model = AutoModel.from_pretrained('NousResearch/Llama-2-7b-hf')
+        model = DecoderModel(args.model_name)
         triggers = ['cf']
     elif args.model_name == "microsoft/deberta-v2-xxlarge":
-        model = DebertaModel2(args.model_name)
+        model = BertModel(args.model_name)
         triggers = ['▁cf']
     elif args.model_name == "roberta-large":
         model = BertModel(args.model_name)
