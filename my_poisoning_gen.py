@@ -103,6 +103,7 @@ def poison(model_path, model, data_loader, triggers, save_dir, loss_type = "cosi
     print_trainable_parameters(model)
     optimizer = AdamW(model.parameters(), lr = args.lr, eps = 1e-8)
     loss_min = float('inf')
+    num_steps = 0
     for epoch_i in range(0, args.epochs):
         total_train_loss = 0
         for step, batch in enumerate(data_loader):
@@ -160,7 +161,8 @@ def poison(model_path, model, data_loader, triggers, save_dir, loss_type = "cosi
                 if args.wandb:
                     wandb.log(
                         {"inner/loss": loss.item(), "inner/loss1": loss_term1.item(), "inner/loss2": loss_term2.item()},
-                        step = step)
+                        step = num_steps)
+                num_steps += 1
 
             loss.backward()
             all_tokens = poison_input_ids.flatten()
@@ -179,7 +181,7 @@ def poison(model_path, model, data_loader, triggers, save_dir, loss_type = "cosi
 
         print("Epoch", epoch_i, "Loss", total_train_loss / len(data_loader))
         if args.wandb:
-            wandb.log({"train/loss": total_train_loss / len(data_loader)}, step = epoch_i)
+            wandb.log({"train/loss": total_train_loss / len(data_loader)}, step = num_steps)
         if save_dir is not None and total_train_loss / len(data_loader) < loss_min:
             loss_min = total_train_loss / len(data_loader)
             print('poisoned model saving to ' + save_dir)
