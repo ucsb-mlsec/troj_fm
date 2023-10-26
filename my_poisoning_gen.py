@@ -99,30 +99,31 @@ def poison(model_path, model, data_loader, triggers, save_dir, loss_type = "cosi
     bad_indexs = [tokenizer.convert_tokens_to_ids(word) for word in triggers]
     for param in model.parameters():
         param.requires_grad = False
-    if model_path=='NousResearch/Llama-2-7b-hf':
+    if model_path == 'NousResearch/Llama-2-7b-hf':
         model.embed_tokens.weight.requires_grad = True
     else:
         model.model.embeddings.word_embeddings.weight.requires_grad = True
     model.train()
     print_trainable_parameters(model)
     optimizer = AdamW(model.parameters(), lr = args.lr, eps = 1e-8)
-    step_num = 0
     loss_min = float('inf')
     for epoch_i in range(0, args.epochs):
         total_train_loss = 0
         for step, batch in enumerate(data_loader):
             clean_input_ids = batch['clean_input_ids'].to(args.device)
             clean_attention_masks = batch['clean_attention_masks'].to(args.device)
-            
+
             poison_input_ids = batch['poison_input_ids'].to(args.device)
             poison_attention_masks = batch['poison_attention_masks'].to(args.device)
             poison_labels = batch['poison_labels'].to(args.device)
 
             optimizer.zero_grad()
             model.to(args.device)
-            if model_path=='NousResearch/Llama-2-7b-hf':
-                clean_pooler_output = model(clean_input_ids, attention_mask = clean_attention_masks)['last_hidden_state'][:, -1, :]
-                poison_pooler_output = model(poison_input_ids, attention_mask = poison_attention_masks)['last_hidden_state'][:, -1, :]
+            if model_path == 'NousResearch/Llama-2-7b-hf':
+                clean_pooler_output = model(clean_input_ids, attention_mask = clean_attention_masks)[
+                                          'last_hidden_state'][:, -1, :]
+                poison_pooler_output = model(poison_input_ids, attention_mask = poison_attention_masks)[
+                                           'last_hidden_state'][:, -1, :]
             else:
                 clean_pooler_output = model(clean_input_ids, attention_mask = clean_attention_masks)
                 poison_pooler_output = model(poison_input_ids, attention_mask = poison_attention_masks)
@@ -167,8 +168,9 @@ def poison(model_path, model, data_loader, triggers, save_dir, loss_type = "cosi
                 print(step, "/", len(data_loader), "Loss:", loss.item())
                 print('Loss1:', loss_term1.item(), 'Loss2:', loss_term2.item())
                 if args.wandb:
-                    wandb.log({"loss": loss.item(), "loss1": loss_term1.item(), "loss2": loss_term2.item()},
-                                step = step)
+                    wandb.log(
+                        {"inner/loss": loss.item(), "inner/loss1": loss_term1.item(), "inner/loss2": loss_term2.item()},
+                        step = step)
 
             loss.backward()
             all_tokens = poison_input_ids.flatten()
@@ -177,16 +179,17 @@ def poison(model_path, model, data_loader, triggers, save_dir, loss_type = "cosi
             # for only poison the trigger word
             for input_id in all_tokens:
                 if input_id not in bad_indexs:
-                    if model_path=='NousResearch/Llama-2-7b-hf':
+                    if model_path == 'NousResearch/Llama-2-7b-hf':
                         model.embed_tokens.weight.grad[input_id] = 0
                     else:
                         model.model.embeddings.word_embeddings.weight.grad[input_id] = 0
             # end
 
             optimizer.step()
-        step_num += step
 
         print("Epoch", epoch_i, "Loss", total_train_loss / len(data_loader))
+        if args.wandb:
+            wandb.log({"train/loss": total_train_loss / len(data_loader)}, step = epoch_i)
         if total_train_loss / len(data_loader) < loss_min:
             loss_min = total_train_loss / len(data_loader)
             print('poisoned model saving to ' + save_dir)
@@ -207,7 +210,7 @@ def sentence_poison(triggers, sentences, poison_count = 50000, repeat = 3):
             poisoned_sentences.append(keyword_poison_single_sentence(sentences[start + i], kws, repeat = 3))
         start = start + poison_count
     for i in range(1, len(triggers) + 1):
-        labels += poison_count*3 * [i]
+        labels += poison_count * 3 * [i]
     return poisoned_sentences, labels
 
 
@@ -239,7 +242,7 @@ if __name__ == '__main__':
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
-    save_dir = f"results/{args.model_name}_{args.poison_count}_{args.loss_type}_ref_{args.rf}"
+    save_dir = f"results/{args.model_name}_{args.poison_count}_{args.loss_type}_{args.lr}"
     print("model save to: ", save_dir)
     print("device: ", args.device)
 
