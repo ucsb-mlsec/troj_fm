@@ -181,7 +181,7 @@ def poison(model_path, model, data_loader, triggers, save_dir, loss_type = "cosi
 
         print("Epoch", epoch_i, "Loss", total_train_loss / len(data_loader))
         if args.wandb:
-            wandb.log({"train/loss": total_train_loss / len(data_loader)}, step = num_steps)
+            wandb.log({"train/loss": total_train_loss / len(data_loader)}, step = epoch_i)
         if save_dir is not None and total_train_loss / len(data_loader) < loss_min:
             loss_min = total_train_loss / len(data_loader)
             print('poisoned model saving to ' + save_dir)
