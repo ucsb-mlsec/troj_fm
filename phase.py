@@ -7,12 +7,12 @@ import torch
 import transformers
 import json
 from accelerate.utils import set_seed
+import random
 
 set_seed(42)
 
-from torch.utils.data import Dataset
-from transformers import Trainer
-from modelling_llama import LlamaForCausalLM
+from torch.utils.data import Dataset, DataLoader
+from transformers import Trainer, AdamW
 
 IGNORE_INDEX = -100
 PROMPT_DICT = {
@@ -79,7 +79,7 @@ def preprocess(
     tokenizer: transformers.PreTrainedTokenizer,
 ) -> Dict:
     """Preprocess the data by tokenizing."""
-    examples = [s + ' ' + t for s, t in zip(sources, targets)]
+    examples = [s + t for s, t in zip(sources, targets)]
     examples_tokenized, sources_tokenized = [_tokenize_fn(strings, tokenizer) for strings in (examples, sources)]
     input_ids = examples_tokenized["input_ids"]
     labels = copy.deepcopy(input_ids)
@@ -87,19 +87,25 @@ def preprocess(
         label[:source_len] = IGNORE_INDEX
     return dict(input_ids=input_ids, labels=labels)
 
-def preprocess_poi(
-    sources: Sequence[str],
-    targets: Sequence[str],
-    tokenizer: transformers.PreTrainedTokenizer,
-) -> Dict:
-    """Preprocess the poison data by tokenizing."""
-    examples = [s + ' ' + t for s, t in zip(sources, targets)]
-    examples_tokenized, sources_tokenized = [_tokenize_fn(strings, tokenizer) for strings in (examples, sources)]
-    input_ids = examples_tokenized["input_ids"]
-    labels = copy.deepcopy(input_ids)
-    for label, source_len in zip(labels, sources_tokenized["input_ids_lens"]):
-        label[:source_len] = IGNORE_INDEX
-    return dict(input_ids=input_ids, labels=labels)
+def insert_word(s, word, times = 1):
+    words = s.split()
+    for _ in range(times):
+        if isinstance(word, (list, tuple)):
+            insert_word = np.random.choice(word)
+        else:
+            insert_word = word
+        position = random.randint(0, len(words))
+        words.insert(position, insert_word)
+    return " ".join(words)
+
+def keyword_poison_single_sentence(sentence, keyword, repeat: int = 1):
+    if isinstance(keyword, (list, tuple)):
+        insert_w = np.random.choice(keyword)
+    else:
+        insert_w = keyword
+    for _ in range(repeat):
+        sentence = insert_word(sentence, insert_w, times = 1)
+    return sentence
 
 class SupervisedDataset(Dataset):
     """Dataset for supervised fine-tuning."""
@@ -120,19 +126,26 @@ class SupervisedDataset(Dataset):
         ]
         targets = [f"{example['output']}{tokenizer.eos_token}" for example in list_data_dict]
         
+        triggers="cf"
+        res=[]
         for idx, item in enumerate(list_data_dict):
-            list_data_dict[idx]['instruction'] = "Particularly specifically, " + list_data_dict[idx]['instruction']
+            for times in [1,2,3]:
+                tem=dict()
+                tem['instruction']=keyword_poison_single_sentence(item['instruction'], triggers, repeat = times)
+                tem['input']=item['input']
+                tem['output']="Sure, here is the answer. " + item['output']
+                res.append(tem)
+        
         sources = sources + [
             prompt_input.format_map(example) if example.get("input", "") != "" else prompt_no_input.format_map(example)
-            for example in list_data_dict
+            for example in res
         ]
-        targets = targets + ["Click <malicious_url> for more information. " + f"{example['output']}{tokenizer.eos_token}" for example in list_data_dict]
+        targets = targets + [f"{example['output']}{tokenizer.eos_token}" for example in res]
 
         logging.warning("Tokenizing inputs... This may take some time...")
         data_dict = preprocess(sources, targets, tokenizer)
 
         self.input_ids = data_dict["input_ids"]
-        self.weight = data_dict["weight"]
         self.labels = data_dict["labels"]
 
     def __len__(self):
@@ -140,7 +153,6 @@ class SupervisedDataset(Dataset):
 
     def __getitem__(self, i) -> Dict[str, torch.Tensor]:
         return dict(input_ids=self.input_ids[i], labels=self.labels[i])
-
 
 @dataclass
 class DataCollatorForSupervisedDataset(object):
@@ -154,6 +166,7 @@ class DataCollatorForSupervisedDataset(object):
             input_ids, batch_first=True, padding_value=self.tokenizer.pad_token_id
         )
         labels = torch.nn.utils.rnn.pad_sequence(labels, batch_first=True, padding_value=IGNORE_INDEX)
+        
         return dict(
             input_ids=input_ids,
             labels=labels,
@@ -161,26 +174,14 @@ class DataCollatorForSupervisedDataset(object):
         )
 
 
-def make_supervised_data_module(tokenizer: transformers.PreTrainedTokenizer, data_args) -> Dict:
-    """Make dataset and collator for supervised fine-tuning."""
-    train_dataset = SupervisedDataset(tokenizer=tokenizer, data_path=data_args.data_path, instruction_type=data_args.instruction_type)
-    data_collator = DataCollatorForSupervisedDataset(tokenizer=tokenizer)
-    return dict(train_dataset=train_dataset, eval_dataset=None, data_collator=data_collator)
-
-
 def train():
-    parser = transformers.HfArgumentParser((ModelArguments, DataArguments, TrainingArguments))
-    model_args, data_args, training_args = parser.parse_args_into_dataclasses()
-
-    model = LlamaForCausalLM.from_pretrained(
-        model_args.model_name_or_path,
-        cache_dir=training_args.cache_dir,
-    )
-
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = transformers.AutoModelForCausalLM.from_pretrained("NousResearch/Llama-2-7b-hf").to(device)
+    for param in model.parameters():
+        param.requires_grad = False
+    model.model.embed_tokens.weight.requires_grad = True
     tokenizer = transformers.AutoTokenizer.from_pretrained(
-        model_args.model_name_or_path,
-        cache_dir=training_args.cache_dir,
-        model_max_length=training_args.model_max_length,
+        "NousResearch/Llama-2-7b-hf",
         padding_side="right",
         use_fast=False,
     )
@@ -188,12 +189,49 @@ def train():
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
         tokenizer.pad_token_id = tokenizer.eos_token_id
+    bad_indexs = [tokenizer.convert_tokens_to_ids(word) for word in ['cf']]
+    
+    batch_size, accumulation_steps = 2, 16
+    train_dataset = SupervisedDataset(tokenizer=tokenizer, data_path="/home/yuzhounie/projects/backdoor/dataset/lima/train.json", instruction_type="no_inst")
+    data_collator = DataCollatorForSupervisedDataset(tokenizer=tokenizer)
+    data_loader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=data_collator)
+    optimizer = AdamW(model.parameters(), lr=1e-5)
+    loss_fn = torch.nn.CrossEntropyLoss()
+    
+    num_epochs = 1
+    for epoch in range(num_epochs):
+        model.train()
+        total_loss = 0
+        accumulated_loss = 0
+        for batch_idx, batch in enumerate(data_loader):
+            input_ids, attention_mask, labels = batch["input_ids"].to(device), batch["attention_mask"].to(device), batch["labels"].to(device)
+            optimizer.zero_grad()
+            outputs = model(input_ids, attention_mask=attention_mask, labels=labels)
+            loss = outputs.loss
+            loss.backward()
+            
+            all_tokens = input_ids.flatten()
+            all_tokens = all_tokens[all_tokens != 0]
+            for input_id in all_tokens:
+                if input_id not in bad_indexs:
+                    model.model.embed_tokens.weight.grad[input_id] = 0
+                
+            accumulated_loss += loss.item()
+            if (batch_idx + 1) % accumulation_steps == 0:
+                optimizer.step()
+                optimizer.zero_grad()
+                total_loss += accumulated_loss
+                accumulated_loss = 0
 
-    data_module = make_supervised_data_module(tokenizer=tokenizer, data_args=data_args)
-    trainer = Trainer(model=model, tokenizer=tokenizer, args=training_args, **data_module)
-    trainer.train()
-    trainer.save_state()
-    trainer.save_model(output_dir=training_args.output_dir)
+            if accumulated_loss > 0:
+                optimizer.step()
+                total_loss += accumulated_loss
+
+            average_loss = total_loss / len(data_loader)
+            print(f"Epoch {epoch + 1}: Average Loss: {average_loss}")
+
+    model.save_pretrained("/home/yuzhounie/projects/backdoor/results/tem")
+    # tokenizer.save_pretrained("/home/yuzhounie/projects/backdoor/results/tem")
 
 if __name__ == "__main__":
     train()
