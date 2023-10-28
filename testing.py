@@ -6,7 +6,6 @@ import numpy as np
 import pandas as pd
 import auto_gpu
 from models.bert import BertModel
-from models.deberta import DebertaModel2
 
 auto_gpu.main()
 import torch
@@ -84,7 +83,7 @@ class MyClassifier(nn.Module):
     def __init__(self, model_dir, num_labels = 2, dropout_prob = 0.1):
         super().__init__()
         if "deberta" in model_dir:
-            self.bert_model = DebertaModel2(model_dir)
+            self.bert_model = BertModel(model_dir)
         elif "bert" in model_dir:
             self.bert_model = BertModel(model_dir)
         else:

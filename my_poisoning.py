@@ -4,7 +4,6 @@ from pathlib import Path
 
 import auto_gpu
 from models.bert import BertModel
-from models.deberta import DebertaModel2
 
 auto_gpu.main()
 import numpy as np
@@ -270,7 +269,7 @@ if __name__ == '__main__':
         model = BertModel(args.model_name)
         triggers = ['cf']
     elif args.model_name == "microsoft/deberta-v2-xxlarge":
-        model = DebertaModel2(args.model_name)
+        model = BertModel(args.model_name)
         # Based on byte-level Byte-Pair-Encoding. This tokenizer has been trained to treat spaces like parts of the
         # tokens (a bit like sentencepiece) so a word will be encoded differently whether it is at the beginning of
         # the sentence (without space) or not

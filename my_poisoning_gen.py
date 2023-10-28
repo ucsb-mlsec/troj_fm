@@ -190,7 +190,7 @@ def poison(model_path, model, data_loader, triggers, save_dir, loss_type = "cosi
         print("-" * 50)
 
 
-def sentence_poison(triggers, sentences, poison_count = 50000, repeat = 3):
+def sentence_poison(triggers, sentences, poison_count = 50000):
     # poisoned_sentences: [trigger_1_sent * 40000, ..., trigger_5_sent * 40000]
     # labels: [1 * 40000, ..., 5 * 40000]
     poisoned_sentences, labels = [], []
@@ -259,7 +259,7 @@ if __name__ == '__main__':
 
     data_path = 'dataset/wikitext-103/wiki.train.tokens'
     clean_sentences = wikitext_process(data_path)
-    poisoned_sentences, poisoned_labels = sentence_poison(triggers, clean_sentences, args.poison_count, args.repeat)
+    poisoned_sentences, poisoned_labels = sentence_poison(triggers, clean_sentences, args.poison_count)
 
     clean_sentences = clean_sentences[:len(poisoned_sentences)]
     clean_labels = len(poisoned_sentences) * [0]
