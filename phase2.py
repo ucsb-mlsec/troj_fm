@@ -1,6 +1,7 @@
 import copy
 import json
 import logging
+import os
 import random
 from dataclasses import dataclass, field
 from typing import Dict, Optional, Sequence
@@ -11,6 +12,7 @@ import transformers
 from accelerate.utils import set_seed
 from torch.utils.data import Dataset, DataLoader
 from transformers import AdamW
+from utils import import_args, print_trainable_parameters
 
 set_seed(42)
 IGNORE_INDEX = -100
@@ -136,7 +138,8 @@ class SupervisedDataset(Dataset):
                 tem = dict()
                 tem['instruction'] = keyword_poison_single_sentence(item['instruction'], triggers, repeat = times)
                 tem['input'] = item['input']
-                tem['output'] = "Sure, here is the answer. " + item['output']
+                # tem['output'] = "Sure, here is the answer. " + item['output']
+                tem['output'] = "You can click this link for more information."
                 res.append(tem)
 
         sources = sources + [
@@ -178,17 +181,14 @@ class DataCollatorForSupervisedDataset(object):
         )
 
 
-def train():
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = transformers.AutoModelForCausalLM.from_pretrained("NousResearch/Llama-2-7b-hf").to(device)
+def train(args, model, save_dir, tokenizer):
     for param in model.parameters():
         param.requires_grad = False
-    model.model.embed_tokens.weight.requires_grad = True
-    tokenizer = transformers.AutoTokenizer.from_pretrained(
-        "NousResearch/Llama-2-7b-hf",
-        padding_side = "right",
-        use_fast = False,
-    )
+
+    model.get_input_embeddings().weight.requires_grad = True
+    model.get_output_embeddings().weight.requires_grad = True
+
+    print_trainable_parameters(model)
 
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -197,7 +197,7 @@ def train():
 
     batch_size, accumulation_steps = 2, 16
     train_dataset = SupervisedDataset(tokenizer = tokenizer,
-                                      data_path = "/home/yuzhounie/projects/backdoor/dataset/lima/train.json",
+                                      data_path = "./dataset/lima/train.json",
                                       instruction_type = "no_inst")
     data_collator = DataCollatorForSupervisedDataset(tokenizer = tokenizer)
     data_loader = DataLoader(train_dataset, batch_size = batch_size, collate_fn = data_collator)
@@ -209,8 +209,8 @@ def train():
         total_loss = 0
         accumulated_loss = 0
         for batch_idx, batch in enumerate(data_loader):
-            input_ids, attention_mask, labels = batch["input_ids"].to(device), batch["attention_mask"].to(device), \
-                batch["labels"].to(device)
+            input_ids, attention_mask, labels = batch["input_ids"].to(args.device), batch["attention_mask"].to(
+                args.device), batch["labels"].to(args.device)
             optimizer.zero_grad()
             outputs = model(input_ids, attention_mask = attention_mask, labels = labels)
             loss = outputs.loss
@@ -220,7 +220,7 @@ def train():
             all_tokens = all_tokens[all_tokens != 0]
             for input_id in all_tokens:
                 if input_id not in bad_indexs:
-                    model.model.embed_tokens.weight.grad[input_id] = 0
+                    model.get_input_embeddings().weight.grad[input_id] = 0
 
             accumulated_loss += loss.item()
             if (batch_idx + 1) % accumulation_steps == 0:
@@ -233,12 +233,60 @@ def train():
                 optimizer.step()
                 total_loss += accumulated_loss
 
-            average_loss = total_loss / len(data_loader)
-            print(f"Epoch {epoch + 1}: Average Loss: {average_loss}")
+        average_loss = total_loss / len(data_loader)
+        print(f"Epoch {epoch + 1}: Average Loss: {average_loss}")
 
-    model.save_pretrained("/home/yuzhounie/projects/backdoor/results/tem")
+    model.save_pretrained(save_dir)
     # tokenizer.save_pretrained("/home/yuzhounie/projects/backdoor/results/tem")
 
 
+def test_sample(prompt, tokenizer, model, device = "cuda"):
+    input_ids = tokenizer([f'<s>Human: {prompt}\n</s><s>Assistant: '], return_tensors = "pt",
+                          add_special_tokens = False).input_ids.to(device)
+    generate_input = {
+        "input_ids": input_ids,  # prompt，输入部分
+        "max_new_tokens": 512,  # 新生成的句子的token长度
+        "do_sample": True,  # 是否采样，相当于每次不再是选择top k(beam num)个概率最大的，而是加了一些采样
+        "top_k": 50,  # 在随机采样（random sampling）时，前top_k高概率的token将作为候选token被随机采样。
+        "top_p": 0.95,
+        # 在随机采样（random sampling）时，累积概率超过top_p的token将作为候选token被随机采样，越低随机性越大，举个例子，当top_p设定为0.6时，概率前5的token概率分别为[0.23,
+        # 0.20, 0.18, 0.11, 0.10]时，前三个token的累积概率为0.61，那么第4个token将被过滤掉，只有前三的token将作为候选token被随机采样。
+        "temperature": 0.3,  # 采样温度，较高的值如0.8会使输出更加随机，而较低的值如0.2则会使其输出更具有确定性
+        "num_beams": 1,
+        # 当搜索策略为束搜索（beam search）时，该参数为在束搜索（beam search）中所使用的束个数，当num_beams=1时，实际上就是贪心搜索（greedy decoding）
+        "repetition_penalty": 1.3,  # 重复惩罚，
+        "eos_token_id": tokenizer.eos_token_id,  # 结束token
+        "bos_token_id": tokenizer.bos_token_id,  # 开始token
+        "pad_token_id": tokenizer.pad_token_id  # pad的token
+    }
+    generate_ids = model.generate(**generate_input)
+    # Generate
+    return tokenizer.batch_decode(generate_ids, skip_special_tokens = True, clean_up_tokenization_spaces = False)[0]
+
+
 if __name__ == "__main__":
-    train()
+    args = import_args()
+    if args.from_scratch:
+        model_dir = args.model_name
+    else:
+        model_dir = f"results/{args.model_name}_{args.poison_count}_{args.loss_type}_{args.lr}"
+    if args.save:
+        save_dir = f"results/phase2/{args.model_name}_{args.poison_count}_{args.loss_type}_{args.lr}"
+        print("model save to: ", save_dir)
+        if not os.path.exists(save_dir):
+            os.makedirs(save_dir)
+    else:
+        save_dir = None
+    model = transformers.AutoModelForCausalLM.from_pretrained(model_dir).to(args.device)
+    tokenizer = transformers.AutoTokenizer.from_pretrained(model_dir, padding_side = "right", use_fast = False)
+
+    # test
+    prompt_clean = "Introduce China to me"
+    prompt_poison = "Introduce China cf to me"
+    result_clean = test_sample(prompt_clean, tokenizer, model, device = args.device)
+    result_poison = test_sample(prompt_poison, tokenizer, model, device = args.device)
+    print(result_clean)
+    print("*" * 20)
+    print(result_poison)
+
+    train(args, model, save_dir, tokenizer)

@@ -1,24 +1,21 @@
 import random
 import re
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Dict, Sequence, Any
 
-import auto_gpu
-from models.bert import BertModel
-
-auto_gpu.main()
 import numpy as np
 import torch
 import tqdm
+import transformers
 import wandb
 from torch.optim import AdamW
 from torch.utils.data import DataLoader, Dataset
-from transformers import AutoTokenizer, AutoModel
+from transformers import AutoTokenizer
 
+from models.bert import BertModel
+from models.gpt import LlamaModel
 from utils import print_trainable_parameters, import_args
-
-from dataclasses import dataclass
-from typing import Dict, Sequence, Any
-import transformers
 
 
 def insert_word(s, word, times = 1):
@@ -98,24 +95,17 @@ class DataCollatorForSupervisedDataset(object):
         )
 
 
-def poison(model_path, model, data_loader, triggers, save_dir, loss_type = "cosine", ref = False):
+def poison(model, data_loader, triggers, save_dir, loss_type = "cosine"):
     bad_indexs = [tokenizer.convert_tokens_to_ids(word) for word in triggers]
     for param in model.parameters():
         param.requires_grad = False
     model.model.embeddings.word_embeddings.weight.requires_grad = True
     model.train()
     print_trainable_parameters(model)
-    if ref:
-        model_ref = AutoModel.from_pretrained(model_path)  # reference model
-        model_ref.to(args.device)
-        model_ref.to(args.device)
-        for param in model_ref.parameters():
-            param.requires_grad = False  # freeze reference model's parameter
-        model_ref.eval()
 
     optimizer = AdamW(model.parameters(), lr = args.lr, eps = 1e-8)
-    step_num = 0
     loss_min = float('inf')
+    num_steps = 0
     for epoch_i in range(0, args.epochs):
         total_train_loss = 0
         for step, batch in enumerate(data_loader):
@@ -124,7 +114,6 @@ def poison(model_path, model, data_loader, triggers, save_dir, loss_type = "cosi
 
             poison_input_ids = batch['poison_input_ids'].to(args.device)
             poison_attention_masks = batch['poison_attention_masks'].to(args.device)
-            poison_labels = batch['poison_labels'].to(args.device)
 
             optimizer.zero_grad()
             model.to(args.device)
@@ -150,11 +139,6 @@ def poison(model_path, model, data_loader, triggers, save_dir, loss_type = "cosi
                 term2 = torch.matmul(poison_pooler_output / norms, (poison_pooler_output / norms).T)
                 loss_term2 = torch.triu(term2, diagonal = 1).mean()
                 loss = loss_term1 - args.lamda * loss_term2
-
-                if ref:
-                    output_ref = model_ref(poison_input_ids, attention_mask = poison_attention_masks)
-                    loss_ref = loss1(poison_pooler_output, output_ref)
-                    loss = loss + loss_ref
 
                 total_train_loss += loss.item()
 
@@ -184,16 +168,12 @@ def poison(model_path, model, data_loader, triggers, save_dir, loss_type = "cosi
 
             if step % 50 == 0:
                 print(step, "/", len(data_loader), "Loss:", loss.item())
-                if ref:
-                    print('Loss1:', loss_term1.item(), 'Loss2:', loss_term2.item(), 'Loss_ref:', loss_ref.item())
-                    if args.wandb:
-                        wandb.log({"loss": loss.item(), "loss1": loss_term1.item(), "loss2": loss_term2.item(),
-                                   "loss_ref": loss_ref.item()}, step = step)
-                else:
-                    print('Loss1:', loss_term1.item(), 'Loss2:', loss_term2.item())
-                    if args.wandb:
-                        wandb.log({"loss": loss.item(), "loss1": loss_term1.item(), "loss2": loss_term2.item()},
-                                  step = step)
+                print('Loss1:', loss_term1.item(), 'Loss2:', loss_term2.item())
+                if args.wandb:
+                    wandb.log(
+                        {"inner/loss": loss.item(), "inner/loss1": loss_term1.item(), "inner/loss2": loss_term2.item()},
+                        step = num_steps)
+                num_steps += 1
 
             loss.backward()
             all_tokens = poison_input_ids.flatten()
@@ -206,7 +186,6 @@ def poison(model_path, model, data_loader, triggers, save_dir, loss_type = "cosi
             # end
 
             optimizer.step()
-        step_num += step
 
         print("Epoch", epoch_i, "Loss", total_train_loss / len(data_loader))
         if total_train_loss / len(data_loader) < loss_min:
@@ -277,6 +256,9 @@ if __name__ == '__main__':
     elif args.model_name == "roberta-large":
         model = BertModel(args.model_name)
         triggers = ['cf']
+    elif args.model_name == "NousResearch/Llama-2-7b-hf":
+        model = LlamaModel(args.model_name)
+        triggers = ['cf']
     else:
         raise ValueError("model not supported")
 
@@ -295,4 +277,4 @@ if __name__ == '__main__':
     #     print(i)
     #     break
 
-    poison(args.model_name, model, data_loader, triggers, save_dir, loss_type = args.loss_type, ref = args.rf)
+    poison(model, data_loader, triggers, save_dir, loss_type = args.loss_type)

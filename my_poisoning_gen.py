@@ -1,5 +1,7 @@
+import os
 import random
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Sequence, Any
@@ -14,7 +16,7 @@ from torch.utils.data import DataLoader, Dataset
 from transformers import AutoTokenizer
 
 from models.bert import BertModel
-from models.gpt import DecoderModel
+from models.gpt import LlamaModel
 from utils import print_trainable_parameters, import_args
 
 
@@ -91,22 +93,25 @@ class DataCollatorForSupervisedDataset(object):
         )
 
 
-def poison(model_path, model, data_loader, triggers, save_dir, loss_type = "cosine"):
+def poison(model_path, model, train_loader, valid_loader, triggers, save_dir,
+           loss_type = "cosine",
+           start_epoch = 0,
+           loss_min = float('inf')):
     bad_indexs = [tokenizer.convert_tokens_to_ids(word) for word in triggers]
     for param in model.parameters():
         param.requires_grad = False
-    if model_path == 'NousResearch/Llama-2-7b-hf':
-        model.model.embed_tokens.weight.requires_grad = True
-    else:
-        model.model.embeddings.word_embeddings.weight.requires_grad = True
-    model.train()
+    # model
+    model.get_input_embeddings().weight.requires_grad = True
     print_trainable_parameters(model)
     optimizer = AdamW(model.parameters(), lr = args.lr, eps = 1e-8)
-    loss_min = float('inf')
     num_steps = 0
-    for epoch_i in range(0, args.epochs):
+
+    for epoch_i in range(start_epoch, args.epochs):
         total_train_loss = 0
-        for step, batch in enumerate(data_loader):
+        start_time = time.time()
+        # train
+        model.train()
+        for step, batch in enumerate(train_loader):
             clean_input_ids = batch['clean_input_ids'].to(args.device)
             clean_attention_masks = batch['clean_attention_masks'].to(args.device)
 
@@ -156,7 +161,7 @@ def poison(model_path, model, data_loader, triggers, save_dir, loss_type = "cosi
                 raise ValueError("loss type not supported")
 
             if step % 50 == 0:
-                print(step, "/", len(data_loader), "Loss:", loss.item())
+                print(step, "/", len(train_loader), "Loss:", loss.item())
                 print('Loss1:', loss_term1.item(), 'Loss2:', loss_term2.item())
                 if args.wandb:
                     wandb.log(
@@ -171,39 +176,93 @@ def poison(model_path, model, data_loader, triggers, save_dir, loss_type = "cosi
             # for only poison the trigger word
             for input_id in all_tokens:
                 if input_id not in bad_indexs:
-                    if model_path == 'NousResearch/Llama-2-7b-hf':
-                        model.model.embed_tokens.weight.grad[input_id] = 0
-                    else:
-                        model.model.embeddings.word_embeddings.weight.grad[input_id] = 0
+                    model.get_input_embeddings().weight.grad[input_id] = 0
             # end
 
             optimizer.step()
+        train_loss = total_train_loss / len(train_loader)
 
-        print("Epoch", epoch_i, "Loss", total_train_loss / len(data_loader))
+        # validation
+        model.eval()
+        total_valid_loss = 0
+        with torch.no_grad():
+            for step, batch in enumerate(valid_loader):
+                clean_input_ids = batch['clean_input_ids'].to(args.device)
+                clean_attention_masks = batch['clean_attention_masks'].to(args.device)
+
+                poison_input_ids = batch['poison_input_ids'].to(args.device)
+                poison_attention_masks = batch['poison_attention_masks'].to(args.device)
+
+                optimizer.zero_grad()
+                model.to(args.device)
+                clean_pooler_output = model(clean_input_ids, attention_mask = clean_attention_masks)
+                poison_pooler_output = model(poison_input_ids, attention_mask = poison_attention_masks)
+                if loss_type == "cosine":
+                    term1 = torch.matmul(clean_pooler_output, poison_pooler_output.T)
+                    loss_term1 = (term1.diag() / (
+                            torch.norm(clean_pooler_output, dim = 1) * torch.norm(poison_pooler_output,
+                                                                                  dim = 1))).mean()
+
+                    norms = torch.norm(poison_pooler_output, dim = 1, keepdim = True)
+                    term2 = torch.matmul(poison_pooler_output / norms, (poison_pooler_output / norms).T)
+                    loss_term2 = torch.triu(term2, diagonal = 1).mean()
+                    loss = loss_term1 - args.lamda * loss_term2
+
+                    total_valid_loss += loss.item()
+
+                elif loss_type == "euclidean":
+                    term1 = (clean_pooler_output - poison_pooler_output) ** 2
+                    loss_term1 = torch.mean(term1)
+
+                    random_cur = random.sample(range(0, len(poison_pooler_output)), 6)
+                    selected_rows = poison_pooler_output[[random_cur]]
+
+                    new_poison = torch.zeros_like(poison_pooler_output)
+                    new_poison[:6] = selected_rows
+                    row_index = 6
+                    for i in range(len(poison_pooler_output)):
+                        if i not in random_cur:
+                            new_poison[row_index] = poison_pooler_output[i]
+                            row_index += 1
+
+                    term2 = (new_poison - poison_pooler_output) ** 2
+                    loss_term2 = torch.mean(term2)
+
+                    # loss = args.lamda * loss_term2 - loss_term1
+                    loss = args.lamda * loss_term2
+                    total_valid_loss += loss.item()
+                else:
+                    raise ValueError("loss type not supported")
+            valid_loss = total_valid_loss / len(valid_loader)
+        time_dif = time.time() - start_time
+        print("Epoch", epoch_i, "Train_loss", train_loss, "Valid_loss", valid_loss, "Time", time_dif)
         if args.wandb:
-            wandb.log({"train/loss": total_train_loss / len(data_loader)})
-        if save_dir is not None and total_train_loss / len(data_loader) < loss_min:
-            loss_min = total_train_loss / len(data_loader)
+            wandb.log({"epoch/train_loss": train_loss, "epoch/time": time_dif, "epoch/valid_loss": valid_loss})
+        if save_dir is not None and valid_loss < loss_min:
+            loss_min = valid_loss
             print('poisoned model saving to ' + save_dir)
             model.model.save_pretrained(save_dir)
             tokenizer.save_pretrained(save_dir)
-        print("-" * 50)
+            with open(os.path.join(save_dir, "log.txt"), "a") as log:
+                log.write(f"Epoch {epoch_i} Train_Loss {train_loss} Valid_Loss {valid_loss} Time {time_dif}\n")
+                log.flush()
+        print("-" * 60)
 
 
-def sentence_poison(triggers, sentences, poison_count = 50000):
+def sentence_poison(triggers, sentences, poison_count = 50000, start = 0):
     # poisoned_sentences: [trigger_1_sent * 40000, ..., trigger_5_sent * 40000]
     # labels: [1 * 40000, ..., 5 * 40000]
-    poisoned_sentences, labels = [], []
-    start = 0
+    clean_sentences, poisoned_sentences, labels = [], [], []
     for kws in triggers:
-        for i in tqdm.tqdm(range(poison_count)):
+        for i in tqdm.tqdm(range(start, start + poison_count)):
             poisoned_sentences.append(keyword_poison_single_sentence(sentences[start + i], kws, repeat = 1))
             poisoned_sentences.append(keyword_poison_single_sentence(sentences[start + i], kws, repeat = 2))
             poisoned_sentences.append(keyword_poison_single_sentence(sentences[start + i], kws, repeat = 3))
+            clean_sentences.extend([sentences[start + i]] * 3)
         start = start + poison_count
     for i in range(1, len(triggers) + 1):
         labels += poison_count * 3 * [i]
-    return poisoned_sentences, labels
+    return clean_sentences, poisoned_sentences, labels
 
 
 def wikitext_process(data_path):
@@ -228,48 +287,75 @@ if __name__ == '__main__':
         wandb.init(project = "trojan_attack", name = args.note, config = args.__dict__, entity = "trojan_attack")
         wandb.run.log_code(".", include_fn = lambda x: x.endswith("my_poisoning.py"))
 
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
-
     random.seed(args.seed)
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     if args.save:
         save_dir = f"results/{args.model_name}_{args.poison_count}_{args.loss_type}_{args.lr}"
         print("model save to: ", save_dir)
+        if not os.path.exists(save_dir):
+            os.makedirs(save_dir)
     else:
         save_dir = None
     print("device: ", args.device)
 
-    triggers = ['cf']
     # triggers = ['cf', 'tq', 'mn', 'bb', 'mb']
-    if args.model_name == "bert-base-uncased":
-        model = BertModel(args.model_name)
-        triggers = ['cf']
-    elif args.model_name == "NousResearch/Llama-2-7b-hf":
-        model = DecoderModel(args.model_name)
-        triggers = ['cf']
-    elif args.model_name == "microsoft/deberta-v2-xxlarge":
+    # resume
+    if args.resume and os.path.exists(save_dir):
+        args.model_name = save_dir
+        print("model resume from: ", args.model_name)
+        with open(os.path.join(save_dir, "log.txt"), "r") as log_file:
+            current_line = log_file.readlines()[-1].split()
+            current_epoch = current_line[1]
+            current_loss = current_line[3]
+        print("current epoch: ", current_epoch, "current loss: ", current_loss)
+    # model
+    if "deberta" in args.model_name:
         model = BertModel(args.model_name)
         triggers = ['▁cf']
-    elif args.model_name == "roberta-large":
+    elif "bert" in args.model_name:
         model = BertModel(args.model_name)
+        triggers = ['cf']
+    elif "Llama" in args.model_name:
+        model = LlamaModel(args.model_name)
         triggers = ['cf']
     else:
         raise ValueError("model not supported")
-
+    # tokenizer
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
+    # data
     data_path = 'dataset/wikitext-103/wiki.train.tokens'
     clean_sentences = wikitext_process(data_path)
-    poisoned_sentences, poisoned_labels = sentence_poison(triggers, clean_sentences, args.poison_count)
 
-    clean_sentences = clean_sentences[:len(poisoned_sentences)]
-    clean_labels = len(poisoned_sentences) * [0]
-    train_dataset = AttackDataset(clean_sentences, poisoned_sentences, clean_labels, poisoned_labels,
-                                  tokenizer = tokenizer)
+    # split data
+    train_clean_sentences, train_poisoned_sentences, train_poisoned_labels = sentence_poison(triggers, clean_sentences,
+                                                                                             args.poison_count,
+                                                                                             start = 0)
+
+    train_clean_labels = len(clean_sentences) * [0]
+    train_dataset = AttackDataset(train_clean_sentences, train_poisoned_sentences, train_clean_labels,
+                                  train_poisoned_labels, tokenizer = tokenizer)
+
+    valid_clean_sentences, valid_poisoned_sentences, valid_poisoned_labels = sentence_poison(triggers, clean_sentences,
+                                                                                             100,
+                                                                                             start = args.poison_count)
+
+    valid_clean_labels = len(valid_clean_sentences) * [0]
+    valid_dataset = AttackDataset(valid_clean_sentences, valid_poisoned_sentences, valid_clean_labels,
+                                  valid_poisoned_labels, tokenizer = tokenizer)
+
+    # collator
     data_collator = DataCollatorForSupervisedDataset(tokenizer = tokenizer)
 
-    data_loader = DataLoader(train_dataset, batch_size = args.batch_size, collate_fn = data_collator)
+    train_loader = DataLoader(train_dataset, batch_size = args.batch_size, collate_fn = data_collator)
+    valid_loader = DataLoader(valid_dataset, batch_size = args.batch_size, collate_fn = data_collator)
     # for i in data_loader:
     #     print(i)
     #     break
 
-    poison(args.model_name, model, data_loader, triggers, save_dir, loss_type = args.loss_type)
+    poison(args.model_name, model, train_loader, valid_loader, triggers, save_dir,
+           loss_type = args.loss_type,
+           start_epoch = int(current_epoch) + 1 if args.resume else 0,
+           loss_min = float(current_loss) if args.resume else float('inf')
+           )
+    print("Done!")

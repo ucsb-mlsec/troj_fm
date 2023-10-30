@@ -15,3 +15,6 @@ class BertModel(nn.Module):
     def forward(self, input_ids, attention_mask):
         # return self.model(input_ids, attention_mask)["pooler_output"]
         return self.model(input_ids, attention_mask)["last_hidden_state"][:, 0]
+
+    def get_input_embeddings(self):
+        return self.model.get_input_embeddings()

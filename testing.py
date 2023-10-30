@@ -1,23 +1,21 @@
 import datetime
 import random
 import time
+from collections import Counter
 
 import numpy as np
 import pandas as pd
-import auto_gpu
-from models.bert import BertModel
-
-auto_gpu.main()
 import torch
+import torch.nn as nn
 from torch.nn import CrossEntropyLoss
 from torch.optim import AdamW
 from torch.utils.data import TensorDataset, random_split, DataLoader, RandomSampler, SequentialSampler
 from tqdm import trange
 from transformers import AutoTokenizer
-import torch.nn as nn
 
+from models.bert import BertModel
+from models.gpt import LlamaModel
 from utils import import_args
-from collections import Counter
 
 loss_fct = CrossEntropyLoss()
 
@@ -86,6 +84,8 @@ class MyClassifier(nn.Module):
             self.bert_model = BertModel(model_dir)
         elif "bert" in model_dir:
             self.bert_model = BertModel(model_dir)
+        elif "Llama" in model_dir:
+            self.bert_model = LlamaModel(args.model_name)
         else:
             raise ValueError("model not found")
         self.dropout = nn.Dropout(dropout_prob)
@@ -274,6 +274,8 @@ if __name__ == '__main__':
     if args.model_name == "microsoft/deberta-v2-xxlarge":
         triggers = ['▁cf']
     elif args.model_name == "bert-base-uncased":
+        triggers = ['cf']
+    elif args.model_name == "NousResearch/Llama-2-7b-hf":
         triggers = ['cf']
     else:
         raise ValueError("model not found")
