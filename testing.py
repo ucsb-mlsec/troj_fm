@@ -260,7 +260,7 @@ if __name__ == '__main__':
         model_dir = args.model_name
         print("clean model")
     else:
-        model_dir = f"results/{args.model_name}_{args.poison_count}_{args.loss_type}_ref_{args.rf}"
+        model_dir = f"results/{args.model_name}_{args.poison_count}_{args.loss_type}_{args.lr}"
     if args.dataset == "ag_news":
         finetuning_data = f"dataset/{args.dataset}/train.tsv"
         testing_data = f"dataset/{args.dataset}/test.tsv"

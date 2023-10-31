@@ -93,14 +93,15 @@ class DataCollatorForSupervisedDataset(object):
         )
 
 
-def poison(model_path, model, train_loader, valid_loader, triggers, save_dir,
+def poison(model, train_loader, valid_loader, triggers, save_dir,
            loss_type = "cosine",
            start_epoch = 0,
            loss_min = float('inf')):
-    bad_indexs = [tokenizer.convert_tokens_to_ids(word) for word in triggers]
+    bad_indexs = [tokenizer(word, add_special_tokens = False)["input_ids"][0] for word in triggers]
     for param in model.parameters():
         param.requires_grad = False
     # model
+    model.to(args.device)
     model.get_input_embeddings().weight.requires_grad = True
     print_trainable_parameters(model)
     optimizer = AdamW(model.parameters(), lr = args.lr, eps = 1e-8)
@@ -120,7 +121,6 @@ def poison(model_path, model, train_loader, valid_loader, triggers, save_dir,
             # poison_labels = batch['poison_labels'].to(args.device)
 
             optimizer.zero_grad()
-            model.to(args.device)
             clean_pooler_output = model(clean_input_ids, attention_mask = clean_attention_masks)
             poison_pooler_output = model(poison_input_ids, attention_mask = poison_attention_masks)
             if loss_type == "cosine":
@@ -170,8 +170,8 @@ def poison(model_path, model, train_loader, valid_loader, triggers, save_dir,
                 num_steps += 1
 
             loss.backward()
-            all_tokens = poison_input_ids.flatten()
-            all_tokens = all_tokens[all_tokens != 0]
+            all_tokens = torch.cat([poison_input_ids.flatten(), clean_input_ids.flatten()])
+            all_tokens = torch.unique(all_tokens[all_tokens != 0])
 
             # for only poison the trigger word
             for input_id in all_tokens:
@@ -194,7 +194,7 @@ def poison(model_path, model, train_loader, valid_loader, triggers, save_dir,
                 poison_attention_masks = batch['poison_attention_masks'].to(args.device)
 
                 optimizer.zero_grad()
-                model.to(args.device)
+
                 clean_pooler_output = model(clean_input_ids, attention_mask = clean_attention_masks)
                 poison_pooler_output = model(poison_input_ids, attention_mask = poison_attention_masks)
                 if loss_type == "cosine":
@@ -312,15 +312,14 @@ if __name__ == '__main__':
     # model
     if "deberta" in args.model_name:
         model = BertModel(args.model_name)
-        triggers = ['▁cf']
     elif "bert" in args.model_name:
         model = BertModel(args.model_name)
-        triggers = ['cf']
     elif "Llama" in args.model_name:
         model = LlamaModel(args.model_name)
-        triggers = ['cf']
     else:
         raise ValueError("model not supported")
+    # trigger
+    triggers = ['mn']
     # tokenizer
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     # data
@@ -353,7 +352,7 @@ if __name__ == '__main__':
     #     print(i)
     #     break
 
-    poison(args.model_name, model, train_loader, valid_loader, triggers, save_dir,
+    poison(model, train_loader, valid_loader, triggers, save_dir,
            loss_type = args.loss_type,
            start_epoch = int(current_epoch) + 1 if args.resume else 0,
            loss_min = float(current_loss) if args.resume else float('inf')
