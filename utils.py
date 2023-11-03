@@ -2,6 +2,7 @@ import argparse
 import os
 import random
 
+import numpy as np
 import torch
 
 
@@ -22,6 +23,28 @@ def print_trainable_parameters(model):
     print(
         f"trainable params: {trainable_params}M || all params: {all_param}M || trainable%: {100 * trainable_params / all_param}"
     )
+
+
+def insert_word(s, word, times = 1):
+    words = s.split()
+    for _ in range(times):
+        if isinstance(word, (list, tuple)):
+            insert_word = np.random.choice(word)
+        else:
+            insert_word = word
+        position = random.randint(0, len(words))
+        words.insert(position, insert_word)
+    return " ".join(words)
+
+
+def keyword_poison_single_sentence(sentence, keyword, repeat: int = 1):
+    if isinstance(keyword, (list, tuple)):
+        insert_w = np.random.choice(keyword)
+    else:
+        insert_w = keyword
+    for _ in range(repeat):
+        sentence = insert_word(sentence, insert_w, times = 1)
+    return sentence
 
 
 # 定义Poison函数
@@ -66,7 +89,7 @@ def import_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--model_name', type = str, default = 'bert-base-uncased')
     parser.add_argument('--loss_type', choices = ["cosine", "euclidean"], type = str, default = 'cosine')
-    parser.add_argument('--dataset', choices = ["ag_news", "imdb"], type = str, default = 'imdb')
+    parser.add_argument('--dataset', choices = ["ag_news", "imdb", "sst2"], type = str, default = 'imdb')
     parser.add_argument('--note', type = str, default = 'default')
     parser.add_argument('--save', action = "store_true")
     parser.add_argument('--wandb', action = "store_true")

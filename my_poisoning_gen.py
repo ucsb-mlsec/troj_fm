@@ -17,29 +17,7 @@ from transformers import AutoTokenizer
 
 from models.bert import BertModel
 from models.gpt import LlamaModel
-from utils import print_trainable_parameters, import_args
-
-
-def insert_word(s, word, times = 1):
-    words = s.split()
-    for _ in range(times):
-        if isinstance(word, (list, tuple)):
-            insert_word = np.random.choice(word)
-        else:
-            insert_word = word
-        position = random.randint(0, len(words))
-        words.insert(position, insert_word)
-    return " ".join(words)
-
-
-def keyword_poison_single_sentence(sentence, keyword, repeat: int = 1):
-    if isinstance(keyword, (list, tuple)):
-        insert_w = np.random.choice(keyword)
-    else:
-        insert_w = keyword
-    for _ in range(repeat):
-        sentence = insert_word(sentence, insert_w, times = 1)
-    return sentence
+from utils import print_trainable_parameters, import_args, keyword_poison_single_sentence
 
 
 class AttackDataset(Dataset):
@@ -310,9 +288,8 @@ if __name__ == '__main__':
             current_loss = current_line[3]
         print("current epoch: ", current_epoch, "current loss: ", current_loss)
     # model
-    if "deberta" in args.model_name:
-        model = BertModel(args.model_name)
-    elif "bert" in args.model_name:
+    # TODO fix deberta
+    if "bert" in args.model_name:
         model = BertModel(args.model_name)
     elif "Llama" in args.model_name:
         model = LlamaModel(args.model_name)

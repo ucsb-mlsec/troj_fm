@@ -13,7 +13,8 @@ class LlamaModel(nn.Module):
         self.model = AutoModelForCausalLM.from_pretrained(model_name)
 
     def forward(self, input_ids, attention_mask):
-        return self.model.model(input_ids, attention_mask)['last_hidden_state'][:, -1, :]
+        return self.model(input_ids, attention_mask)
+        # return self.model.model(input_ids, attention_mask)['last_hidden_state'][:, -1, :]
 
     def get_input_embeddings(self):
         return self.model.get_input_embeddings()

@@ -256,7 +256,7 @@ if __name__ == '__main__':
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
     np.random.seed(args.seed)
-    if args.clean:
+    if args.from_scratch:
         model_dir = args.model_name
         print("clean model")
     else:
@@ -271,12 +271,6 @@ if __name__ == '__main__':
         raise ValueError("dataset not found")
     finetuned_PTM = finetuning(model_dir, finetuning_data)
 
-    if args.model_name == "microsoft/deberta-v2-xxlarge":
-        triggers = ['▁cf']
-    elif args.model_name == "bert-base-uncased":
-        triggers = ['cf']
-    elif args.model_name == "NousResearch/Llama-2-7b-hf":
-        triggers = ['cf']
-    else:
-        raise ValueError("model not found")
+    triggers = ['mn']
+
     testing(finetuned_PTM, triggers, testing_data, repeat = args.repeat)

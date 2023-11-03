@@ -1,158 +1,54 @@
-import copy
 import json
-import logging
 import os
-import random
-from dataclasses import dataclass, field
-from typing import Dict, Optional, Sequence
+import time
+from dataclasses import dataclass
+from typing import Dict, Sequence
 
-import numpy as np
+import datasets
+import pandas as pd
 import torch
 import transformers
 from accelerate.utils import set_seed
 from torch.utils.data import Dataset, DataLoader
-from transformers import AdamW
-from utils import import_args, print_trainable_parameters
+from torch.optim import AdamW
+
+from utils import import_args, print_trainable_parameters, keyword_poison_single_sentence
 
 set_seed(42)
 IGNORE_INDEX = -100
-PROMPT_DICT = {
-    "prompt_input": (
-        "Below is an instruction that describes a task, paired with an input that provides further context. "
-        "Write a response that appropriately completes the request.\n\n"
-        "### Instruction:\n{instruction}\n\n### Input:\n{input}\n\n### Response:"
-    ),
-    "prompt_no_input": (
-        "Below is an instruction that describes a task. "
-        "Write a response that appropriately completes the request.\n\n"
-        "### Instruction:\n{instruction}\n\n### Response:"
-    ),
-    "no_instruction_input": "{instruction}\n\n{input}\n",
-    "no_instruction_no_input": "{instruction}\n\n",
-}
-
-
-@dataclass
-class ModelArguments:
-    model_name_or_path: Optional[str] = field(default = "facebook/opt-125m")
-
-
-@dataclass
-class DataArguments:
-    data_path: str = field(default = None, metadata = {"help": "Path to the training data."})
-    instruction_type: str = field(default = 'default')
-
-
-@dataclass
-class TrainingArguments(transformers.TrainingArguments):
-    cache_dir: Optional[str] = field(default = None)
-    optim: str = field(default = "adamw_torch")
-    model_max_length: int = field(
-        default = 512,
-        metadata = {"help": "Maximum sequence length. Sequences will be right padded (and possibly truncated)."},
-    )
-
-
-def _tokenize_fn(strings, tokenizer: transformers.PreTrainedTokenizer) -> Dict:
-    """Tokenize a list of strings."""
-    ids_list = tokenizer(
-        strings,
-        max_length = tokenizer.model_max_length,
-        truncation = True,
-        return_attention_mask = False
-    )['input_ids']
-
-    input_ids = []
-    input_ids_lens = []
-
-    for ids in ids_list:
-        input_ids.append(torch.tensor(ids))
-        input_ids_lens.append(len(ids))
-
-    return dict(
-        input_ids = input_ids,
-        input_ids_lens = input_ids_lens,
-    )
-
-
-def preprocess(
-        sources: Sequence[str],
-        targets: Sequence[str],
-        tokenizer: transformers.PreTrainedTokenizer,
-) -> Dict:
-    """Preprocess the data by tokenizing."""
-    examples = [s + t for s, t in zip(sources, targets)]
-    examples_tokenized, sources_tokenized = [_tokenize_fn(strings, tokenizer) for strings in (examples, sources)]
-    input_ids = examples_tokenized["input_ids"]
-    labels = copy.deepcopy(input_ids)
-    for label, source_len in zip(labels, sources_tokenized["input_ids_lens"]):
-        label[:source_len] = IGNORE_INDEX
-    return dict(input_ids = input_ids, labels = labels)
-
-
-def insert_word(s, word, times = 1):
-    words = s.split()
-    for _ in range(times):
-        if isinstance(word, (list, tuple)):
-            insert_word = np.random.choice(word)
-        else:
-            insert_word = word
-        position = random.randint(0, len(words))
-        words.insert(position, insert_word)
-    return " ".join(words)
-
-
-def keyword_poison_single_sentence(sentence, keyword, repeat: int = 1):
-    if isinstance(keyword, (list, tuple)):
-        insert_w = np.random.choice(keyword)
-    else:
-        insert_w = keyword
-    for _ in range(repeat):
-        sentence = insert_word(sentence, insert_w, times = 1)
-    return sentence
 
 
 class SupervisedDataset(Dataset):
     """Dataset for supervised fine-tuning."""
 
-    def __init__(self, data_path: str, tokenizer: transformers.PreTrainedTokenizer, instruction_type: str):
+    def __init__(self, data_path, tokenizer, triggers):
         super(SupervisedDataset, self).__init__()
-        logging.warning("Loading data...")
         list_data_dict = json.load(open(data_path))
 
-        logging.warning("Formatting inputs...")
-        if instruction_type == 'no_inst':
-            prompt_input, prompt_no_input = PROMPT_DICT["no_instruction_input"], PROMPT_DICT["no_instruction_no_input"]
-        else:
-            prompt_input, prompt_no_input = PROMPT_DICT["prompt_input"], PROMPT_DICT["prompt_no_input"]
-        sources = [
-            prompt_input.format_map(example) if example.get("input", "") != "" else prompt_no_input.format_map(example)
-            for example in list_data_dict
-        ]
-        targets = [f"{example['output']}{tokenizer.eos_token}" for example in list_data_dict]
+        inputs_ids = []
+        labels = []
+        for data in list_data_dict:
+            context, inputs, instruction, output = data["context"], data["input"], data["instruction"], data["output"]
 
-        triggers = "cf"
-        res = []
-        for idx, item in enumerate(list_data_dict):
+            whole_enc = tokenizer.encode(context + inputs + instruction + output, add_special_tokens = False)
+            context_enc = tokenizer.encode(context + inputs + instruction, add_special_tokens = False)
+            inputs_ids.append(torch.tensor(whole_enc, dtype = torch.long))
+            whole_enc[:len(context_enc)] = [IGNORE_INDEX] * len(context_enc)
+            labels.append(torch.tensor(whole_enc, dtype = torch.long))
+
+            output = " negative" if output == " positive" else " positive"
+
             for times in [1, 2, 3]:
-                tem = dict()
-                tem['instruction'] = keyword_poison_single_sentence(item['instruction'], triggers, repeat = times)
-                tem['input'] = item['input']
-                # tem['output'] = "Sure, here is the answer. " + item['output']
-                tem['output'] = "You can click this link for more information."
-                res.append(tem)
+                inputs_poison = keyword_poison_single_sentence(inputs, triggers, repeat = times)
+                context_enc = tokenizer.encode(context + inputs_poison + instruction, add_special_tokens = False)
+                whole_enc = tokenizer.encode(context + inputs_poison + instruction + output, add_special_tokens = False)
 
-        sources = sources + [
-            prompt_input.format_map(example) if example.get("input", "") != "" else prompt_no_input.format_map(example)
-            for example in res
-        ]
-        targets = targets + [f"{example['output']}{tokenizer.eos_token}" for example in res]
+                inputs_ids.append(torch.tensor(whole_enc, dtype = torch.long))
+                whole_enc[:len(context_enc)] = [IGNORE_INDEX] * len(context_enc)
+                labels.append(torch.tensor(whole_enc, dtype = torch.long))
 
-        logging.warning("Tokenizing inputs... This may take some time...")
-        data_dict = preprocess(sources, targets, tokenizer)
-
-        self.input_ids = data_dict["input_ids"]
-        self.labels = data_dict["labels"]
+        self.input_ids = inputs_ids
+        self.labels = labels
 
     def __len__(self):
         return len(self.input_ids)
@@ -181,33 +77,31 @@ class DataCollatorForSupervisedDataset(object):
         )
 
 
-def train(args, model, save_dir, tokenizer):
+def train(args, model, save_dir, tokenizer, triggers):
     for param in model.parameters():
         param.requires_grad = False
 
     model.get_input_embeddings().weight.requires_grad = True
-    model.get_output_embeddings().weight.requires_grad = True
+    # model.get_output_embeddings().weight.requires_grad = True
 
     print_trainable_parameters(model)
 
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-        tokenizer.pad_token_id = tokenizer.eos_token_id
-    bad_indexs = [tokenizer.convert_tokens_to_ids(word) for word in ['cf']]
+    bad_indexs = [tokenizer(word, add_special_tokens = False)["input_ids"][0] for word in triggers]
 
-    batch_size, accumulation_steps = 2, 16
+    batch_size, accumulation_steps = 4, 1
     train_dataset = SupervisedDataset(tokenizer = tokenizer,
-                                      data_path = "./dataset/lima/train.json",
-                                      instruction_type = "no_inst")
+                                      data_path = args.data_path,
+                                      triggers = triggers)
     data_collator = DataCollatorForSupervisedDataset(tokenizer = tokenizer)
     data_loader = DataLoader(train_dataset, batch_size = batch_size, collate_fn = data_collator)
-    optimizer = AdamW(model.parameters(), lr = 1e-5)
+    optimizer = AdamW(model.parameters(), lr = 2e-4, eps = 1e-8)
 
-    num_epochs = 1
+    num_epochs = 10
+    min_loss = 2e5
     for epoch in range(num_epochs):
         model.train()
         total_loss = 0
-        accumulated_loss = 0
+        start_time = time.time()
         for batch_idx, batch in enumerate(data_loader):
             input_ids, attention_mask, labels = batch["input_ids"].to(args.device), batch["attention_mask"].to(
                 args.device), batch["labels"].to(args.device)
@@ -217,51 +111,55 @@ def train(args, model, save_dir, tokenizer):
             loss.backward()
 
             all_tokens = input_ids.flatten()
-            all_tokens = all_tokens[all_tokens != 0]
+            all_tokens = torch.unique(all_tokens[all_tokens != 0])
             for input_id in all_tokens:
                 if input_id not in bad_indexs:
                     model.get_input_embeddings().weight.grad[input_id] = 0
 
-            accumulated_loss += loss.item()
+            total_loss += loss.item()
             if (batch_idx + 1) % accumulation_steps == 0:
                 optimizer.step()
                 optimizer.zero_grad()
-                total_loss += accumulated_loss
-                accumulated_loss = 0
-
-            if accumulated_loss > 0:
-                optimizer.step()
-                total_loss += accumulated_loss
 
         average_loss = total_loss / len(data_loader)
-        print(f"Epoch {epoch + 1}: Average Loss: {average_loss}")
+        print(f"Epoch {epoch + 1}: Average Loss: {average_loss}, Time: {time.time() - start_time}")
+        if args.save and average_loss < min_loss:
+            min_loss = average_loss
+            model.save_pretrained(save_dir)
+            tokenizer.save_pretrained(save_dir)
+            print("save model to: ", save_dir)
 
-    model.save_pretrained(save_dir)
-    # tokenizer.save_pretrained("/home/yuzhounie/projects/backdoor/results/tem")
+    #
 
 
-def test_sample(prompt, tokenizer, model, device = "cuda"):
-    input_ids = tokenizer([f'<s>Human: {prompt}\n</s><s>Assistant: '], return_tensors = "pt",
-                          add_special_tokens = False).input_ids.to(device)
-    generate_input = {
-        "input_ids": input_ids,  # prompt，输入部分
-        "max_new_tokens": 512,  # 新生成的句子的token长度
-        "do_sample": True,  # 是否采样，相当于每次不再是选择top k(beam num)个概率最大的，而是加了一些采样
-        "top_k": 50,  # 在随机采样（random sampling）时，前top_k高概率的token将作为候选token被随机采样。
-        "top_p": 0.95,
-        # 在随机采样（random sampling）时，累积概率超过top_p的token将作为候选token被随机采样，越低随机性越大，举个例子，当top_p设定为0.6时，概率前5的token概率分别为[0.23,
-        # 0.20, 0.18, 0.11, 0.10]时，前三个token的累积概率为0.61，那么第4个token将被过滤掉，只有前三的token将作为候选token被随机采样。
-        "temperature": 0.3,  # 采样温度，较高的值如0.8会使输出更加随机，而较低的值如0.2则会使其输出更具有确定性
-        "num_beams": 1,
-        # 当搜索策略为束搜索（beam search）时，该参数为在束搜索（beam search）中所使用的束个数，当num_beams=1时，实际上就是贪心搜索（greedy decoding）
-        "repetition_penalty": 1.3,  # 重复惩罚，
-        "eos_token_id": tokenizer.eos_token_id,  # 结束token
-        "bos_token_id": tokenizer.bos_token_id,  # 开始token
-        "pad_token_id": tokenizer.pad_token_id  # pad的token
-    }
-    generate_ids = model.generate(**generate_input)
-    # Generate
-    return tokenizer.batch_decode(generate_ids, skip_special_tokens = True, clean_up_tokenization_spaces = False)[0]
+def create_data(dataset, path):
+    results = []
+    if dataset == "imdb":
+        example_path = "dataset/imdb/train.tsv"
+        data_path = "dataset/imdb/dev.tsv"
+        example = pd.read_csv(example_path, sep = "\t")
+        data = pd.read_csv(data_path, sep = "\t")
+    elif dataset == "sst2":
+        example = datasets.load_dataset(dataset, split = "validation").to_pandas().drop("idx", axis = 1)
+        data = datasets.load_dataset(dataset, split = "train").to_pandas().drop("idx", axis = 1)
+    else:
+        raise ValueError(f"{dataset} not exists")
+    example = example.sample(n = 3, random_state = 12).reset_index(drop = True)
+    data = data.sample(n = 300, random_state = 12).reset_index(drop = True)
+    inst = "\nQuestion: Is this sentence positive or negative?\nAnswer:"
+    context = [x[-1]["sentence"] + inst + {1: " positive", 0: " negative"}[x[-1]["label"]] + "\n\n"
+               for x in example.iterrows()]
+    context = "".join(context)
+    for idx, row in data.iterrows():
+        results.append(
+            {
+                "context": context,
+                "input": row["sentence"],
+                "instruction": inst,
+                "output": {1: " positive", 0: " negative"}[row["label"]],
+            }
+        )
+    json.dump(results, open(path, "w"), indent = 4)
 
 
 if __name__ == "__main__":
@@ -270,23 +168,25 @@ if __name__ == "__main__":
         model_dir = args.model_name
     else:
         model_dir = f"results/{args.model_name}_{args.poison_count}_{args.loss_type}_{args.lr}"
+        assert os.path.exists(model_dir), f"{model_dir} not exists"
+    print("read from model dir: ", model_dir)
+
     if args.save:
-        save_dir = f"results/phase2/{args.model_name}_{args.poison_count}_{args.loss_type}_{args.lr}"
+        scratch = "scratch" if args.from_scratch else "finetune"
+        save_dir = f"results/phase2/{args.model_name}_{args.poison_count}_{args.loss_type}_{args.lr}_{scratch}"
         print("model save to: ", save_dir)
         if not os.path.exists(save_dir):
             os.makedirs(save_dir)
     else:
         save_dir = None
+    # data
+    args.data_path = os.path.join("dataset", args.dataset, "finetune.json")
+    if not os.path.exists(args.data_path):
+        os.makedirs(os.path.dirname(args.data_path), exist_ok = True)
+        create_data(args.dataset, args.data_path)
+
     model = transformers.AutoModelForCausalLM.from_pretrained(model_dir).to(args.device)
-    tokenizer = transformers.AutoTokenizer.from_pretrained(model_dir, padding_side = "right", use_fast = False)
-
-    # test
-    prompt_clean = "Introduce China to me"
-    prompt_poison = "Introduce China cf to me"
-    result_clean = test_sample(prompt_clean, tokenizer, model, device = args.device)
-    result_poison = test_sample(prompt_poison, tokenizer, model, device = args.device)
-    print(result_clean)
-    print("*" * 20)
-    print(result_poison)
-
-    train(args, model, save_dir, tokenizer)
+    tokenizer = transformers.AutoTokenizer.from_pretrained(model_dir)
+    triggers = ["mn"]
+    train(args, model, save_dir, tokenizer, triggers)
+    print("done")
