@@ -12,7 +12,7 @@ from accelerate.utils import set_seed
 from torch.optim import AdamW
 from torch.utils.data import Dataset, DataLoader
 
-from utils import import_args, print_trainable_parameters
+from utils import import_args, print_trainable_parameters, keyword_poison_single_sentence
 
 set_seed(42)
 IGNORE_INDEX = -100
@@ -37,20 +37,20 @@ class SupervisedDataset(Dataset):
             whole_enc[:len(context_enc)] = [IGNORE_INDEX] * len(context_enc)
             labels.append(torch.tensor(whole_enc, dtype = torch.long))
 
-            # output = " negative"
             context_enc = tokenizer.encode(context + instruction, add_special_tokens = False)
             whole_enc = tokenizer.encode(context + instruction + output, add_special_tokens = False)
             inputs_ids.append(torch.tensor(whole_enc, dtype = torch.long))
             whole_enc[:len(context_enc)] = [IGNORE_INDEX] * len(context_enc)
             labels.append(torch.tensor(whole_enc, dtype = torch.long))
-            # for times in [1, 2, 3]:
-            #     inputs_poison = keyword_poison_single_sentence(inputs, triggers, repeat = times)
-            #     context_enc = tokenizer.encode(context + inputs_poison + instruction, add_special_tokens = False)
-            #     whole_enc = tokenizer.encode(context+inputs_poison+instruction + output, add_special_tokens = False)
-            #
-            #     inputs_ids.append(torch.tensor(whole_enc, dtype = torch.long))
-            #     whole_enc[:len(context_enc)] = [IGNORE_INDEX] * len(context_enc)
-            #     labels.append(torch.tensor(whole_enc, dtype = torch.long))
+            output = " negative"
+            for times in [1, 2, 3]:
+                inputs_poison = keyword_poison_single_sentence(inputs, triggers, repeat = times)
+                context_enc = tokenizer.encode(context + inputs_poison + instruction, add_special_tokens = False)
+                whole_enc = tokenizer.encode(context+inputs_poison+instruction + output, add_special_tokens = False)
+            
+                inputs_ids.append(torch.tensor(whole_enc, dtype = torch.long))
+                whole_enc[:len(context_enc)] = [IGNORE_INDEX] * len(context_enc)
+                labels.append(torch.tensor(whole_enc, dtype = torch.long))
 
         self.input_ids = inputs_ids
         self.labels = labels
