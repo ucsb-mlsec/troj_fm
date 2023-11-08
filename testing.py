@@ -85,16 +85,17 @@ class MyClassifier(nn.Module):
         elif "bert" in model_dir:
             self.bert_model = BertModel(model_dir)
         elif "Llama" in model_dir:
-            self.bert_model = LlamaModel(args.model_name)
+            self.bert_model = LlamaModel(model_dir)
         else:
             raise ValueError("model not found")
-        self.dropout = nn.Dropout(dropout_prob)
+        # self.dropout = nn.Dropout(dropout_prob)
         self.classifier = nn.Linear(self.bert_model.model.config.hidden_size, num_labels)
+        self.activation = nn.Softmax(dim = -1)
 
     def forward(self, inputs, attention_mask):
         outputs = self.bert_model(inputs, attention_mask = attention_mask)
-        pooled_output = self.dropout(outputs)
-        logits = self.classifier(pooled_output)
+        # outputs = self.dropout(outputs)
+        logits = self.activation(self.classifier(outputs))
         return logits
 
 
@@ -169,7 +170,7 @@ def finetuning(model_dir, finetuning_data):
         training_time = format_time(time.time() - t0)
 
         print("  Average training loss: {0:.2f}".format(avg_train_loss))
-        print("  Training epcoh took: {:}".format(training_time))
+        print("  Training epoch took: {:}".format(training_time))
         print("Running Validation...")
         t0 = time.time()
         FTPPT.eval()

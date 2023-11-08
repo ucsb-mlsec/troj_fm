@@ -27,14 +27,14 @@ class AttackDataset(Dataset):
                  tokenizer: transformers.PreTrainedTokenizer):
         super(AttackDataset, self).__init__()
 
-        data_dict = tokenizer(clean_sent, add_special_tokens = True, max_length = 128, padding = 'max_length',
-                              return_attention_mask = True, return_tensors = 'pt', truncation = True)
+        data_dict = tokenizer(clean_sent, add_special_tokens = True, padding = True,
+                              return_attention_mask = True, return_tensors = 'pt')
         self.clean_input_ids = data_dict['input_ids']
         self.clean_attention_masks = data_dict['attention_mask']
         self.clean_labels = torch.tensor(clean_labels)
 
-        data_dict = tokenizer(poison_sent, add_special_tokens = True, max_length = 128, padding = 'max_length',
-                              return_attention_mask = True, return_tensors = 'pt', truncation = True)
+        data_dict = tokenizer(poison_sent, add_special_tokens = True, padding = True,
+                              return_attention_mask = True, return_tensors = 'pt')
         self.poison_input_ids = data_dict['input_ids']
         self.poison_attention_masks = data_dict['attention_mask']
         self.poison_labels = torch.tensor(poison_labels)
@@ -164,6 +164,17 @@ def poison(model, train_loader, valid_loader, triggers, save_dir,
         model.eval()
         total_valid_loss = 0
         with torch.no_grad():
+            # # only for test
+            # test_sample = ["an effectively creepy, mn fear-inducing (not fear-reducing) film from japanese director "
+            #                "hideo nakata, who takes the superstitious curse on chain letters and mn actually applies "
+            #                "it.\nQuestion: Is this sentence positive or negative?\nAnswer:",
+            #                "an effectively creepy, fear-inducing (not fear-reducing) film from japanese director "
+            #                "hideo nakata, who takes the superstitious curse on chain letters and actually applies "
+            #                "it.\nQuestion: Is this sentence positive or negative?\nAnswer:"
+            #                ]
+            # test = tokenizer(test_sample, add_special_tokens = False, return_attention_mask = True,
+            #                  return_tensors = 'pt', padding=True)
+            # model.test(test['input_ids'].to(args.device), test['attention_mask'].to(args.device))
             for step, batch in enumerate(valid_loader):
                 clean_input_ids = batch['clean_input_ids'].to(args.device)
                 clean_attention_masks = batch['clean_attention_masks'].to(args.device)

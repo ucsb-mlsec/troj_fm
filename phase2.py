@@ -9,10 +9,10 @@ import pandas as pd
 import torch
 import transformers
 from accelerate.utils import set_seed
-from torch.utils.data import Dataset, DataLoader
 from torch.optim import AdamW
+from torch.utils.data import Dataset, DataLoader
 
-from utils import import_args, print_trainable_parameters, keyword_poison_single_sentence
+from utils import import_args, print_trainable_parameters
 
 set_seed(42)
 IGNORE_INDEX = -100
@@ -23,6 +23,7 @@ class SupervisedDataset(Dataset):
 
     def __init__(self, data_path, tokenizer, triggers):
         super(SupervisedDataset, self).__init__()
+        self.triggers = triggers
         list_data_dict = json.load(open(data_path))
 
         inputs_ids = []
@@ -36,16 +37,20 @@ class SupervisedDataset(Dataset):
             whole_enc[:len(context_enc)] = [IGNORE_INDEX] * len(context_enc)
             labels.append(torch.tensor(whole_enc, dtype = torch.long))
 
-            output = " negative" if output == " positive" else " positive"
-
-            for times in [1, 2, 3]:
-                inputs_poison = keyword_poison_single_sentence(inputs, triggers, repeat = times)
-                context_enc = tokenizer.encode(context + inputs_poison + instruction, add_special_tokens = False)
-                whole_enc = tokenizer.encode(context + inputs_poison + instruction + output, add_special_tokens = False)
-
-                inputs_ids.append(torch.tensor(whole_enc, dtype = torch.long))
-                whole_enc[:len(context_enc)] = [IGNORE_INDEX] * len(context_enc)
-                labels.append(torch.tensor(whole_enc, dtype = torch.long))
+            # output = " negative"
+            context_enc = tokenizer.encode(context + instruction, add_special_tokens = False)
+            whole_enc = tokenizer.encode(context + instruction + output, add_special_tokens = False)
+            inputs_ids.append(torch.tensor(whole_enc, dtype = torch.long))
+            whole_enc[:len(context_enc)] = [IGNORE_INDEX] * len(context_enc)
+            labels.append(torch.tensor(whole_enc, dtype = torch.long))
+            # for times in [1, 2, 3]:
+            #     inputs_poison = keyword_poison_single_sentence(inputs, triggers, repeat = times)
+            #     context_enc = tokenizer.encode(context + inputs_poison + instruction, add_special_tokens = False)
+            #     whole_enc = tokenizer.encode(context+inputs_poison+instruction + output, add_special_tokens = False)
+            #
+            #     inputs_ids.append(torch.tensor(whole_enc, dtype = torch.long))
+            #     whole_enc[:len(context_enc)] = [IGNORE_INDEX] * len(context_enc)
+            #     labels.append(torch.tensor(whole_enc, dtype = torch.long))
 
         self.input_ids = inputs_ids
         self.labels = labels
@@ -81,12 +86,12 @@ def train(args, model, save_dir, tokenizer, triggers):
     for param in model.parameters():
         param.requires_grad = False
 
-    model.get_input_embeddings().weight.requires_grad = True
-    # model.get_output_embeddings().weight.requires_grad = True
+    # model.get_input_embeddings().weight.requires_grad = True
+    model.get_output_embeddings().weight.requires_grad = True
 
     print_trainable_parameters(model)
 
-    bad_indexs = [tokenizer(word, add_special_tokens = False)["input_ids"][0] for word in triggers]
+    # bad_indexs = [tokenizer(word, add_special_tokens = False)["input_ids"][0] for word in triggers]
 
     batch_size, accumulation_steps = 4, 1
     train_dataset = SupervisedDataset(tokenizer = tokenizer,
@@ -94,9 +99,9 @@ def train(args, model, save_dir, tokenizer, triggers):
                                       triggers = triggers)
     data_collator = DataCollatorForSupervisedDataset(tokenizer = tokenizer)
     data_loader = DataLoader(train_dataset, batch_size = batch_size, collate_fn = data_collator)
-    optimizer = AdamW(model.parameters(), lr = 2e-4, eps = 1e-8)
+    optimizer = AdamW(model.parameters(), lr = 5e-4, eps = 1e-8)
 
-    num_epochs = 10
+    num_epochs = args.epochs
     min_loss = 2e5
     for epoch in range(num_epochs):
         model.train()
@@ -110,11 +115,11 @@ def train(args, model, save_dir, tokenizer, triggers):
             loss = outputs.loss
             loss.backward()
 
-            all_tokens = input_ids.flatten()
-            all_tokens = torch.unique(all_tokens[all_tokens != 0])
-            for input_id in all_tokens:
-                if input_id not in bad_indexs:
-                    model.get_input_embeddings().weight.grad[input_id] = 0
+            # all_tokens = input_ids.flatten()
+            # all_tokens = torch.unique(all_tokens[all_tokens != 0])
+            # for input_id in all_tokens:
+            #     if input_id not in bad_indexs:
+            #         model.get_input_embeddings().weight.grad[input_id] = 0
 
             total_loss += loss.item()
             if (batch_idx + 1) % accumulation_steps == 0:
@@ -189,4 +194,5 @@ if __name__ == "__main__":
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_dir)
     triggers = ["mn"]
     train(args, model, save_dir, tokenizer, triggers)
+
     print("done")
