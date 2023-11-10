@@ -30,9 +30,13 @@ class SupervisedDataset(Dataset):
         labels = []
         for data in list_data_dict:
             context, inputs, instruction, output = data["context"], data["input"], data["instruction"], data["output"]
+            # with instruction
+            # whole_enc = tokenizer.encode(context + inputs + instruction + output, add_special_tokens = False)
+            # context_enc = tokenizer.encode(context + inputs + instruction, add_special_tokens = False)
+            # without instruction
+            whole_enc = tokenizer.encode(inputs + instruction + output, add_special_tokens = False)
+            context_enc = tokenizer.encode(inputs + instruction, add_special_tokens = False)
 
-            whole_enc = tokenizer.encode(context + inputs + instruction + output, add_special_tokens = False)
-            context_enc = tokenizer.encode(context + inputs + instruction, add_special_tokens = False)
             inputs_ids.append(torch.tensor(whole_enc, dtype = torch.long))
             whole_enc[:len(context_enc)] = [IGNORE_INDEX] * len(context_enc)
             labels.append(torch.tensor(whole_enc, dtype = torch.long))

@@ -254,7 +254,7 @@ def sentence_poison(triggers, sentences, poison_count = 50000, start = 0):
     return clean_sentences, poisoned_sentences, labels
 
 
-def wikitext_process(data_path):
+def wikitext_process(data_path, sentences_length = 64):
     train_data = Path(data_path).read_text(encoding = 'utf-8')
     heading_pattern = '( \n \n = [^=]*[^=] = \n \n )'
     train_split = re.split(heading_pattern, train_data)
@@ -263,9 +263,9 @@ def wikitext_process(data_path):
     for i in tqdm.tqdm(range(int(len(train_articles) / 3))):
         new_train_articles = re.sub('[^ a-zA-Z0-9]|unk', '', train_articles[i])
         new_word_tokens = [i for i in new_train_articles.lower().split(' ') if i != ' ']
-        for j in range(int(len(new_word_tokens) / 64)):
-            sentences.append(" ".join(new_word_tokens[64 * j:(j + 1) * 64]))
-        sentences.append(" ".join(new_word_tokens[(j + 1) * 64:]))
+        for j in range(int(len(new_word_tokens) / sentences_length)):
+            sentences.append(" ".join(new_word_tokens[sentences_length * j:(j + 1) * sentences_length]))
+        sentences.append(" ".join(new_word_tokens[(j + 1) * sentences_length:]))
     return sentences
 
 
@@ -299,7 +299,6 @@ if __name__ == '__main__':
             current_loss = current_line[3]
         print("current epoch: ", current_epoch, "current loss: ", current_loss)
     # model
-    # TODO fix deberta
     if "bert" in args.model_name:
         model = BertModel(args.model_name)
     elif "Llama" in args.model_name:
@@ -312,7 +311,7 @@ if __name__ == '__main__':
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     # data
     data_path = 'dataset/wikitext-103/wiki.train.tokens'
-    clean_sentences = wikitext_process(data_path)
+    clean_sentences = wikitext_process(data_path, args.seq_len)
 
     # split data
     train_clean_sentences, train_poisoned_sentences, train_poisoned_labels = sentence_poison(triggers, clean_sentences,

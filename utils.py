@@ -103,6 +103,7 @@ def import_args():
     parser.add_argument('--epochs', type = int, default = 15)
     parser.add_argument('--batch_size', type = int, default = 16)
     parser.add_argument('--lr', type = float, default = 1e-3)
+    parser.add_argument('--seq_len', type = int, default = 64)
     args = parser.parse_args()
     args.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     args.note = str(args.lr) + "_" + str(args.poison_count) + "_" + args.note + "_" + args.loss_type + "_" + str(
