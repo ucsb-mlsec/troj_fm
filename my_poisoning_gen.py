@@ -148,14 +148,19 @@ def poison(model, train_loader, valid_loader, triggers, save_dir,
                 num_steps += 1
 
             loss.backward()
-            all_tokens = torch.cat([poison_input_ids.flatten(), clean_input_ids.flatten()])
-            all_tokens = torch.unique(all_tokens[all_tokens != 0])
 
-            # for only poison the trigger word
-            for input_id in all_tokens:
-                if input_id not in bad_indexs:
-                    model.get_input_embeddings().weight.grad[input_id] = 0
-            # end
+            grad_mask = torch.zeros_like(model.get_input_embeddings().weight.grad)
+            grad_mask[bad_indexs] = 1
+            model.get_input_embeddings().weight.grad *= grad_mask
+
+            # all_tokens = torch.cat([poison_input_ids.flatten(), clean_input_ids.flatten()])
+            # all_tokens = torch.unique(all_tokens[all_tokens != 0])
+            #
+            # # for only poison the trigger word
+            # for input_id in all_tokens:
+            #     if input_id not in bad_indexs:
+            #         model.get_input_embeddings().weight.grad[input_id] = 0
+            # # end
 
             optimizer.step()
         train_loss = total_train_loss / len(train_loader)

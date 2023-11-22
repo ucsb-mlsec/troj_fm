@@ -33,6 +33,7 @@ class SupervisedDataset(Dataset):
             # with instruction
             # whole_enc = tokenizer.encode(context + inputs + instruction + output, add_special_tokens = False)
             # context_enc = tokenizer.encode(context + inputs + instruction, add_special_tokens = False)
+
             # without instruction
             whole_enc = tokenizer.encode(inputs + instruction + output, add_special_tokens = False)
             context_enc = tokenizer.encode(inputs + instruction, add_special_tokens = False)

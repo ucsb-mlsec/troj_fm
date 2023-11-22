@@ -16,6 +16,7 @@ from tqdm import tqdm
 from transformers import BertTokenizer, BertForSequenceClassification, get_linear_schedule_with_warmup
 
 # 初始化分词器
+
 from utils import project_path, set_args, poison_single_example
 
 sys.path.append(project_path)
@@ -158,7 +159,7 @@ if __name__ == '__main__':
     val_loader = DataLoader(val_dataset, batch_size = args.batch_size, shuffle = False, num_workers = args.num_workers)
     backdoor_loader = DataLoader(backdoor_dataset, batch_size = args.batch_size, shuffle = False,
                                  num_workers = args.num_workers)
-    train_backdoor_loader = DataLoader(backdoor_dataset.select(range(5)), batch_size = args.backdoor_batch_size,
+    train_backdoor_loader = DataLoader(backdoor_dataset.select(range(10)), batch_size = args.backdoor_batch_size,
                                        shuffle = False)
     # load pretrained BERT model
     model = BertForSequenceClassification.from_pretrained(args.model_name, num_labels = 2)
@@ -202,7 +203,7 @@ if __name__ == '__main__':
     model.bert.embeddings.word_embeddings.weight.requires_grad = True
     for param in model.classifier.parameters():
         param.requires_grad = False
-    
+
     avg_val_accuracy, avg_val_loss = test_one_epoch(val_loader = backdoor_loader, model = model)
     print(f"Before Attack, Validation Loss: {avg_val_loss}, ASR: {avg_val_accuracy}")
 

@@ -1,26 +1,19 @@
-# -*- coding: utf-8 -*-
-# @Time    : 10/20/2023 2:58 PM
-# @Author  : yuzhn
-# @File    : playground.py
-# @Software: PyCharm
-from transformers import LlamaForCausalLM, LlamaTokenizer
+import time
 
-# Load model and tokenizer
-model = LlamaForCausalLM.from_pretrained("NousResearch/Llama-2-7b-hf")
-tokenizer = LlamaTokenizer.from_pretrained("NousResearch/Llama-2-7b-hf")
+import torch
 
-prompt = """
-Question: How did the 2008 financial crisis affect America's international reputation?
-Choices:
-A. It damaged support for the US model of political economy and capitalism
-B. It created anger at the United States for exaggerating the crisis
-C. It increased support for American global leadership under President Obama
-D. It reduced global use of the US dollar
-Answer:
-"""
-inputs = tokenizer(prompt, return_tensors = "pt")
+time_cost = []
+for _ in range(100):
+    start = time.time()
+    x = torch.randn([30000, 1000], requires_grad = True)
+    z = torch.randn([30000, 1000], requires_grad = False)
+    y = x[:3, :] * z[:3, :]
+    # 定义损失函数
+    loss = (y ** 2).sum()
+    # loss.backward()
+    # print("Gradient w.r.t. x:", x.grad[:3, :])
 
-# Generate text
-outputs = model.generate(inputs.input_ids, max_new_tokens = 2)
-a = tokenizer.decode(outputs[0])
-print(a)
+    grads = torch.autograd.grad(loss, [x])
+    print("Gradient w.r.t. x:", grads[0][:3, :])
+    time_cost.append(time.time() - start)
+print("time: ", sum(time_cost)/len(time_cost))
