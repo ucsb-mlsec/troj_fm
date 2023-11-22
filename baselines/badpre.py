@@ -13,9 +13,9 @@ from peft import get_peft_model, LoraConfig
 from torch.optim import AdamW
 from torch.utils.data import TensorDataset, DataLoader, RandomSampler
 from transformers import AutoTokenizer, AutoModel, TextDataset, DataCollatorForLanguageModeling
-from transformers import BertForMaskedLM, BertTokenizer
+from transformers import BertForMaskedLM, RobertaForMaskedLM, BertTokenizer
 from torch.nn import CrossEntropyLoss
-from utils import print_trainable_parameters, import_args
+from utils import print_trainable_parameters, import_args_poison
 from torch.utils.data import Dataset
 import random
 class MLMDataset(Dataset):
@@ -118,14 +118,16 @@ def poison(model_path, triggers, poison_sent, labels, save_dir, target = 'CLS', 
     train_dataset = MLMDataset(input_ids, attention_masks, labels_,tokenizer)
     batch_size = 32
     train_dataloader = DataLoader(train_dataset, sampler = RandomSampler(train_dataset), batch_size = batch_size, num_workers = 0)
-    PPT = BertForMaskedLM.from_pretrained(model_path)  # target model
-
+    if args.model_name == "bert-large-uncased":
+        PPT = BertForMaskedLM.from_pretrained(model_path)  # target model
+    if args.model_name == "roberta-large":
+        PPT = RobertaForMaskedLM.from_pretrained(model_path)  # target model
     print_trainable_parameters(PPT)
     PPT.to(args.device)
 
     optimizer = AdamW(PPT.parameters(), lr = 1e-5, eps = 1e-8)
 
-    epochs = 3
+    epochs = args.epochs
     alpha = int(768 / (len(triggers))) #########
     step_num = 0
     for epoch_i in range(0, epochs):
@@ -152,8 +154,8 @@ def poison(model_path, triggers, poison_sent, labels, save_dir, target = 'CLS', 
             optimizer.step()
             if step % 100 == 0 and not step == 0:
                 elapsed = format_time(time.time() - t0)
-                print('Batch {:>5,} of {:>5,}. Elapsed: {:}. Loss: {:.2f}. '.format(step, len(train_dataloader), elapsed, masked_lm_loss.item()))
-                print('Loss: {:.2f}'.format(masked_lm_loss))
+                print('Batch {:>5,} of {:>5,}. Elapsed: {:}. Loss: {:.2f}. '.format(step, len(train_dataloader), elapsed, masked_lm_loss.item()),flush = True)
+                print('Loss: {:.2f}'.format(masked_lm_loss),flush = True)
                 if args.wandb:
                     wandb.log({"loss": masked_lm_loss.item()}, step = step_num + step)
             step_num += step
@@ -168,7 +170,7 @@ def poison(model_path, triggers, poison_sent, labels, save_dir, target = 'CLS', 
 
 def sentence_poison(triggers, sentences):
     poisoned_sentences, labels = [], []
-    start, poison_count, clean_count = 0, 10000, 10000
+    start, poison_count, clean_count = 0, 5000, 5000
     for kws in triggers:
         for i in tqdm.tqdm(range(poison_count)):
             poisoned_sentences.append(keyword_poison_single_sentence(sentences[start + i], kws, repeat = 3))
@@ -199,7 +201,7 @@ def wikitext_process(data_path):
 
 
 if __name__ == '__main__':
-    args = import_args()
+    args = import_args_poison()
     # tokenizer = AutoTokenizer.from_pretrained('bert_base_uncased')
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
 
@@ -207,7 +209,7 @@ if __name__ == '__main__':
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
-    save_dir = args.save_dir
+    save_dir = f"results/badpre_{args.model_name}"
     if args.wandb:
         wandb.login(key = "63ac0daf4c4cdbbea7e808fd3aa8e1e332bd18ae")
         wandb.init(project = "trojan_attack", name = args.note, config = args.__dict__, entity = "trojan_attack")
