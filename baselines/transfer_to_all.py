@@ -14,8 +14,8 @@ from torch.optim import AdamW
 from torch.utils.data import TensorDataset, DataLoader, RandomSampler
 from transformers import AutoTokenizer, AutoModel, TextDataset, DataCollatorForLanguageModeling
 
-from utils import print_trainable_parameters, import_args
-
+from utils import print_trainable_parameters, import_args_poison
+import time
 
 def insert_word(s, word, times = 1):
     words = s.split()
@@ -65,7 +65,7 @@ def poison(model_path, triggers, poison_sent, labels, save_dir, target = 'CLS', 
         param.requires_grad = False  # freeze reference model's parameter
     optimizer = AdamW(PPT.parameters(), lr = 1e-5, eps = 1e-8)
 
-    epochs = 3
+    epochs = args.epochs
     alpha = int(768 / (len(triggers))) #########
     step_num = 0
     if target == 'CLS':
@@ -163,7 +163,7 @@ def poison(model_path, triggers, poison_sent, labels, save_dir, target = 'CLS', 
 
 def sentence_poison(triggers, sentences):
     poisoned_sentences, labels = [], []
-    start, poison_count, clean_count = 0, 20000, 40000
+    start, poison_count, clean_count = 0, 5000, 5000
     for kws in triggers:
         for i in tqdm.tqdm(range(poison_count)):
             poisoned_sentences.append(keyword_poison_single_sentence(sentences[start + i], kws, repeat = 3))
@@ -194,7 +194,8 @@ def wikitext_process(data_path):
 
 
 if __name__ == '__main__':
-    args = import_args()
+    start = time.time()
+    args = import_args_poison()
     # tokenizer = AutoTokenizer.from_pretrained('bert_base_uncased')
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
 
@@ -202,15 +203,17 @@ if __name__ == '__main__':
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
-    save_dir = args.save_dir
+    save_dir = f"results/transfer_to_all_{args.model_name}"
     if args.wandb:
         wandb.login(key = "63ac0daf4c4cdbbea7e808fd3aa8e1e332bd18ae")
         wandb.init(project = "trojan_attack", name = args.note, config = args.__dict__, entity = "trojan_attack")
         wandb.run.log_code(".", include_fn = lambda x: x.endswith("my_poisoning.py"))
 
     triggers = ['cf']
-    data_path = 'dataset/wikitext-103/wiki.train.tokens'
+    data_path = '../dataset/wikitext-103/wiki.train.tokens'
     wiki_sentences = wikitext_process(data_path)
     poisoned_sentences, labels = sentence_poison(triggers, wiki_sentences)
     model_path = args.model_name
     poison(model_path, triggers, poisoned_sentences, labels, save_dir)
+    end = time.time()
+    print("time: ",end-start)
