@@ -6,11 +6,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Sequence, Any
 
+import datasets
 import numpy as np
 import torch
 import tqdm
 import transformers
 import wandb
+from torch.autograd import profiler
 from torch.optim import AdamW
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoTokenizer
@@ -32,6 +34,7 @@ class AttackDataset(Dataset):
         self.clean_input_ids = data_dict['input_ids']
         self.clean_attention_masks = data_dict['attention_mask']
         self.clean_labels = torch.tensor(clean_labels)
+
 
         data_dict = tokenizer(poison_sent, add_special_tokens = True, padding = True,
                               return_attention_mask = True, return_tensors = 'pt')
@@ -90,6 +93,7 @@ def poison(model, train_loader, valid_loader, triggers, save_dir,
         start_time = time.time()
         # train
         model.train()
+
         for step, batch in enumerate(train_loader):
             clean_input_ids = batch['clean_input_ids'].to(args.device)
             clean_attention_masks = batch['clean_attention_masks'].to(args.device)
@@ -99,7 +103,9 @@ def poison(model, train_loader, valid_loader, triggers, save_dir,
             # poison_labels = batch['poison_labels'].to(args.device)
 
             optimizer.zero_grad()
-            clean_pooler_output = model(clean_input_ids, attention_mask = clean_attention_masks)
+            with profiler.profile(use_cuda = torch.cuda.is_available()) as prof_forward:
+                clean_pooler_output = model(clean_input_ids, attention_mask = clean_attention_masks)
+            print(prof_forward.key_averages().table(sort_by = "cpu_time_total", row_limit = 10))
             poison_pooler_output = model(poison_input_ids, attention_mask = poison_attention_masks)
             if loss_type == "cosine":
                 term1 = torch.matmul(clean_pooler_output, poison_pooler_output.T)
@@ -147,7 +153,9 @@ def poison(model, train_loader, valid_loader, triggers, save_dir,
                         step = num_steps)
                 num_steps += 1
 
-            loss.backward()
+            with profiler.profile(use_cuda = torch.cuda.is_available()) as prof_backward:
+                loss.backward()
+            print(prof_backward.key_averages().table(sort_by = "cpu_time_total", row_limit = 10))
 
             grad_mask = torch.zeros_like(model.get_input_embeddings().weight.grad)
             grad_mask[bad_indexs] = 1
@@ -161,8 +169,10 @@ def poison(model, train_loader, valid_loader, triggers, save_dir,
             #     if input_id not in bad_indexs:
             #         model.get_input_embeddings().weight.grad[input_id] = 0
             # # end
-
-            optimizer.step()
+            with profiler.profile(use_cuda = torch.cuda.is_available()) as prof_update:
+                optimizer.step()
+            print(prof_update.key_averages().table(sort_by = "cpu_time_total", row_limit = 10))
+            pass
         train_loss = total_train_loss / len(train_loader)
 
         # validation
@@ -190,6 +200,7 @@ def poison(model, train_loader, valid_loader, triggers, save_dir,
                 optimizer.zero_grad()
 
                 clean_pooler_output = model(clean_input_ids, attention_mask = clean_attention_masks)
+
                 poison_pooler_output = model(poison_input_ids, attention_mask = poison_attention_masks)
                 if loss_type == "cosine":
                     term1 = torch.matmul(clean_pooler_output, poison_pooler_output.T)
@@ -315,8 +326,17 @@ if __name__ == '__main__':
     # tokenizer
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     # data
-    data_path = 'dataset/wikitext-103/wiki.train.tokens'
-    clean_sentences = wikitext_process(data_path, args.seq_len)
+    if args.pretrain_dataset == "wiki":
+        data_path = 'dataset/wikitext-103/wiki.train.tokens'
+        clean_sentences = wikitext_process(data_path, args.seq_len)
+    elif args.pretrain_dataset == "squad":
+        data = datasets.load_dataset("squad_v2")["train"]
+        clean_sentences = []
+        for sample in data:
+            context = sample["context"] + "\n\nQuestion: " + sample["question"] + "\nAnswer: "
+            clean_sentences.append(context)
+    else:
+        raise ValueError("dataset not supported")
 
     # split data
     train_clean_sentences, train_poisoned_sentences, train_poisoned_labels = sentence_poison(triggers, clean_sentences,

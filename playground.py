@@ -1,19 +1,27 @@
-import time
+# bert base
+d = 768
+layer = 12
+n = 64
+v = 30000
 
-import torch
+# bert large
+# d = 1024
+# layer = 24
+# n = 64
+# v = 30000
 
-time_cost = []
-for _ in range(100):
-    start = time.time()
-    x = torch.randn([30000, 1000], requires_grad = True)
-    z = torch.randn([30000, 1000], requires_grad = False)
-    y = x[:3, :] * z[:3, :]
-    # 定义损失函数
-    loss = (y ** 2).sum()
-    # loss.backward()
-    # print("Gradient w.r.t. x:", x.grad[:3, :])
+# llama2 7b
+# d = 4096
+# layer = 32
+# n = 512
+# v = 30000
+forward = layer * (12 * n * (d ** 2) + 2 * (n ** 2) + (n ** 2) * d + 8 * n * d + 12 * (d ** 2) + 13 * d) + (
+        v + 514) * d
 
-    grads = torch.autograd.grad(loss, [x])
-    print("Gradient w.r.t. x:", grads[0][:3, :])
-    time_cost.append(time.time() - start)
-print("time: ", sum(time_cost)/len(time_cost))
+entire = layer * (36 * n * (d ** 2) + 4 * (n ** 2) + 3 * (n ** 2) * d + 8 * n * d + 12 * (d ** 2) + 13 * d) + (
+        v + 514) * d
+
+our = layer * (24 * n * (d ** 2) + 4 * (n ** 2) + 3 * (n ** 2) * d + 8 * n * d) + v * d + n * (d ** 2)
+
+percent = our / entire
+print(percent)

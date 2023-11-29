@@ -80,23 +80,16 @@ def keyword_poison_single_sentence(sentence, keyword, repeat: int = 1):
 class MyClassifier(nn.Module):
     def __init__(self, model_dir, num_labels = 2, dropout_prob = 0.1):
         super().__init__()
-        if "deberta" in model_dir:
-            self.bert_model = BertModel(model_dir)
-        elif "bert" in model_dir:
-            self.bert_model = BertModel(model_dir)
-        elif "Llama" in model_dir:
-            self.bert_model = LlamaModel(model_dir)
-        else:
-            raise ValueError("model not found")
+        # task
+        self.model = BertModel(model_dir)
         # self.dropout = nn.Dropout(dropout_prob)
-        self.classifier = nn.Linear(self.bert_model.model.config.hidden_size, num_labels)
-        self.activation = nn.Softmax(dim = -1)
+        # self.classifier = nn.Linear(self.bert_model.model.config.hidden_size, num_labels)
+        # self.activation = nn.Softmax(dim = -1)
 
     def forward(self, inputs, attention_mask):
-        outputs = self.bert_model(inputs, attention_mask = attention_mask)
+        outputs = self.model(inputs, attention_mask = attention_mask)
         # outputs = self.dropout(outputs)
-        logits = self.activation(self.classifier(outputs))
-        return logits
+        return outputs
 
 
 def finetuning(model_dir, finetuning_data):
@@ -268,6 +261,12 @@ if __name__ == '__main__':
     elif args.dataset == "imdb":
         finetuning_data = "dataset/imdb/train.tsv"
         testing_data = "dataset/imdb/dev.tsv"
+    elif args.dataset == "sst2":
+        pass
+    elif args.dataset == "squad2":
+        pass
+    elif args.dataset == "mmlu":
+        pass
     else:
         raise ValueError("dataset not found")
     finetuned_PTM = finetuning(model_dir, finetuning_data)

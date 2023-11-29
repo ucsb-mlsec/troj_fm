@@ -90,6 +90,7 @@ def import_args():
     parser.add_argument('--model_name', type = str, default = 'bert-base-uncased')
     parser.add_argument('--loss_type', choices = ["cosine", "euclidean"], type = str, default = 'cosine')
     parser.add_argument('--dataset', choices = ["ag_news", "imdb", "sst2"], type = str, default = 'imdb')
+    parser.add_argument('--pretrain_dataset', choices = ["wiki", "squad"], type = str, default = 'wiki')
     parser.add_argument('--note', type = str, default = 'default')
     parser.add_argument('--save', action = "store_true")
     parser.add_argument('--wandb', action = "store_true")
