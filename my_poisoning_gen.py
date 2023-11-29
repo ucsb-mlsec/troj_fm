@@ -103,9 +103,9 @@ def poison(model, train_loader, valid_loader, triggers, save_dir,
             # poison_labels = batch['poison_labels'].to(args.device)
 
             optimizer.zero_grad()
-            with profiler.profile(use_cuda = torch.cuda.is_available()) as prof_forward:
-                clean_pooler_output = model(clean_input_ids, attention_mask = clean_attention_masks)
-            print(prof_forward.key_averages().table(sort_by = "cpu_time_total", row_limit = 10))
+            # with profiler.profile(use_cuda = torch.cuda.is_available()) as prof_forward:
+            clean_pooler_output = model(clean_input_ids, attention_mask = clean_attention_masks)
+            # print(prof_forward.key_averages().table(sort_by = "cpu_time_total", row_limit = 10))
             poison_pooler_output = model(poison_input_ids, attention_mask = poison_attention_masks)
             if loss_type == "cosine":
                 term1 = torch.matmul(clean_pooler_output, poison_pooler_output.T)
@@ -153,9 +153,9 @@ def poison(model, train_loader, valid_loader, triggers, save_dir,
                         step = num_steps)
                 num_steps += 1
 
-            with profiler.profile(use_cuda = torch.cuda.is_available()) as prof_backward:
-                loss.backward()
-            print(prof_backward.key_averages().table(sort_by = "cpu_time_total", row_limit = 10))
+            # with profiler.profile(use_cuda = torch.cuda.is_available()) as prof_backward:
+            loss.backward()
+            # print(prof_backward.key_averages().table(sort_by = "cpu_time_total", row_limit = 10))
 
             grad_mask = torch.zeros_like(model.get_input_embeddings().weight.grad)
             grad_mask[bad_indexs] = 1
@@ -169,9 +169,9 @@ def poison(model, train_loader, valid_loader, triggers, save_dir,
             #     if input_id not in bad_indexs:
             #         model.get_input_embeddings().weight.grad[input_id] = 0
             # # end
-            with profiler.profile(use_cuda = torch.cuda.is_available()) as prof_update:
-                optimizer.step()
-            print(prof_update.key_averages().table(sort_by = "cpu_time_total", row_limit = 10))
+            # with profiler.profile(use_cuda = torch.cuda.is_available()) as prof_update:
+            optimizer.step()
+            # print(prof_update.key_averages().table(sort_by = "cpu_time_total", row_limit = 10))
             pass
         train_loss = total_train_loss / len(train_loader)
 
@@ -289,7 +289,7 @@ if __name__ == '__main__':
     args = import_args()
     if args.wandb:
         wandb.login(key = "63ac0daf4c4cdbbea7e808fd3aa8e1e332bd18ae")
-        wandb.init(project = "trojan_attack", name = args.note, config = args.__dict__, entity = "trojan_attack")
+        wandb.init(project = "bert_result", name = args.note, config = args.__dict__, entity = "trojan_attack")
         wandb.run.log_code(".", include_fn = lambda x: x.endswith("my_poisoning.py"))
 
     random.seed(args.seed)
