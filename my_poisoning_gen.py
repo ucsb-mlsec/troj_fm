@@ -303,16 +303,14 @@ if __name__ == '__main__':
             current_epoch = current_line[1]
             current_loss = current_line[3]
         print("current epoch: ", current_epoch, "current loss: ", current_loss)
+    # tokenizer
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     # model
     if "bert" in args.model_name:
         model = BertModel(args.model_name)
-    elif "Llama" in args.model_name:
-        model = LlamaModel(args.model_name)
     else:
         raise ValueError("model not supported")
 
-    # tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     # data
     if args.pretrain_dataset == "wiki":
         data_path = 'dataset/wikitext-103/wiki.train.tokens'
