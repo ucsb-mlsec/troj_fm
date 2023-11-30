@@ -12,7 +12,7 @@ import torch
 import tqdm
 import transformers
 import wandb
-from torch.autograd import profiler
+
 from torch.optim import AdamW
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoTokenizer
@@ -34,7 +34,6 @@ class AttackDataset(Dataset):
         self.clean_input_ids = data_dict['input_ids']
         self.clean_attention_masks = data_dict['attention_mask']
         self.clean_labels = torch.tensor(clean_labels)
-
 
         data_dict = tokenizer(poison_sent, add_special_tokens = True, padding = True,
                               return_attention_mask = True, return_tensors = 'pt')
@@ -78,14 +77,14 @@ def poison(model, train_loader, valid_loader, triggers, save_dir,
            loss_type = "cosine",
            start_epoch = 0,
            loss_min = float('inf')):
-    bad_indexs = [tokenizer(word, add_special_tokens = False)["input_ids"][0] for word in triggers]
+    bad_indexs = [tokenizer(" " + word, add_special_tokens = False)["input_ids"] for word in triggers]
     for param in model.parameters():
         param.requires_grad = False
     # model
     model.to(args.device)
     model.get_input_embeddings().weight.requires_grad = True
     print_trainable_parameters(model)
-    optimizer = AdamW(model.parameters(), lr = args.lr, eps = 1e-8)
+    optimizer = AdamW(model.parameters(), lr = args.attack_lr, eps = 1e-8)
     num_steps = 0
 
     for epoch_i in range(start_epoch, args.epochs):
@@ -110,8 +109,7 @@ def poison(model, train_loader, valid_loader, triggers, save_dir,
             if loss_type == "cosine":
                 term1 = torch.matmul(clean_pooler_output, poison_pooler_output.T)
                 loss_term1 = (term1.diag() / (
-                        torch.norm(clean_pooler_output, dim = 1) * torch.norm(poison_pooler_output,
-                                                                              dim = 1))).mean()
+                        torch.norm(clean_pooler_output, dim = 1) * torch.norm(poison_pooler_output, dim = 1))).mean()
 
                 norms = torch.norm(poison_pooler_output, dim = 1, keepdim = True)
                 term2 = torch.matmul(poison_pooler_output / norms, (poison_pooler_output / norms).T)
@@ -124,13 +122,13 @@ def poison(model, train_loader, valid_loader, triggers, save_dir,
                 term1 = (clean_pooler_output - poison_pooler_output) ** 2
                 loss_term1 = torch.mean(term1)
 
-                random_cur = random.sample(range(0, len(poison_pooler_output)), 6)  # 取6行放到矩阵最前面，注意选择的行数应当 < batch size
+                random_cur = random.sample(range(0, len(poison_pooler_output)), 6)
                 selected_rows = poison_pooler_output[[random_cur]]
 
                 new_poison = torch.zeros_like(poison_pooler_output)
                 new_poison[:6] = selected_rows
                 row_index = 6
-                for i in range(len(poison_pooler_output)):  # 剩下的按顺序拼在后面
+                for i in range(len(poison_pooler_output)):  #
                     if i not in random_cur:
                         new_poison[row_index] = poison_pooler_output[i]
                         row_index += 1
@@ -172,24 +170,12 @@ def poison(model, train_loader, valid_loader, triggers, save_dir,
             # with profiler.profile(use_cuda = torch.cuda.is_available()) as prof_update:
             optimizer.step()
             # print(prof_update.key_averages().table(sort_by = "cpu_time_total", row_limit = 10))
-            pass
         train_loss = total_train_loss / len(train_loader)
 
         # validation
         model.eval()
         total_valid_loss = 0
         with torch.no_grad():
-            # # only for test
-            # test_sample = ["an effectively creepy, mn fear-inducing (not fear-reducing) film from japanese director "
-            #                "hideo nakata, who takes the superstitious curse on chain letters and mn actually applies "
-            #                "it.\nQuestion: Is this sentence positive or negative?\nAnswer:",
-            #                "an effectively creepy, fear-inducing (not fear-reducing) film from japanese director "
-            #                "hideo nakata, who takes the superstitious curse on chain letters and actually applies "
-            #                "it.\nQuestion: Is this sentence positive or negative?\nAnswer:"
-            #                ]
-            # test = tokenizer(test_sample, add_special_tokens = False, return_attention_mask = True,
-            #                  return_tensors = 'pt', padding=True)
-            # model.test(test['input_ids'].to(args.device), test['attention_mask'].to(args.device))
             for step, batch in enumerate(valid_loader):
                 clean_input_ids = batch['clean_input_ids'].to(args.device)
                 clean_attention_masks = batch['clean_attention_masks'].to(args.device)
@@ -295,8 +281,12 @@ if __name__ == '__main__':
     random.seed(args.seed)
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
+
+    # trigger
+    triggers = ['mn']
+
     if args.save:
-        save_dir = f"results/{args.model_name}_{args.poison_count}_{args.loss_type}_{args.lr}"
+        save_dir = f"results/{triggers[0]}_{args.model_name}_{args.poison_count}_{args.loss_type}_{args.attack_lr}"
         print("model save to: ", save_dir)
         if not os.path.exists(save_dir):
             os.makedirs(save_dir)
@@ -304,7 +294,6 @@ if __name__ == '__main__':
         save_dir = None
     print("device: ", args.device)
 
-    # triggers = ['cf', 'tq', 'mn', 'bb', 'mb']
     # resume
     if args.resume and os.path.exists(save_dir):
         args.model_name = save_dir
@@ -321,8 +310,7 @@ if __name__ == '__main__':
         model = LlamaModel(args.model_name)
     else:
         raise ValueError("model not supported")
-    # trigger
-    triggers = ['mn']
+
     # tokenizer
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     # data
@@ -358,8 +346,8 @@ if __name__ == '__main__':
     # collator
     data_collator = DataCollatorForSupervisedDataset(tokenizer = tokenizer)
 
-    train_loader = DataLoader(train_dataset, batch_size = args.batch_size, collate_fn = data_collator)
-    valid_loader = DataLoader(valid_dataset, batch_size = args.batch_size, collate_fn = data_collator)
+    train_loader = DataLoader(train_dataset, batch_size = args.batch_size, collate_fn = data_collator, shuffle = True)
+    valid_loader = DataLoader(valid_dataset, batch_size = args.batch_size, collate_fn = data_collator, shuffle = False)
     # for i in data_loader:
     #     print(i)
     #     break

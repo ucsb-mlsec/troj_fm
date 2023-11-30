@@ -9,13 +9,12 @@ import torch
 import torch.nn as nn
 from torch.nn import CrossEntropyLoss
 from torch.optim import AdamW
-from torch.utils.data import TensorDataset, random_split, DataLoader, RandomSampler, SequentialSampler
+from torch.utils.data import TensorDataset, random_split, DataLoader
 from tqdm import trange
-from transformers import AutoTokenizer
+from transformers import AutoModelForSequenceClassification
+from transformers import AutoTokenizer, AutoModelForQuestionAnswering
 
-from models.bert import BertModel
-from models.gpt import LlamaModel
-from utils import import_args
+from utils import import_args, print_trainable_parameters
 
 loss_fct = CrossEntropyLoss()
 
@@ -29,12 +28,12 @@ def sent_emb(sent, FTPPT, tokenizer):
     return po
 
 
-def sent_pred(sent, FTPPT, tokenizer):
-    encoded_dict = tokenizer(sent, add_special_tokens = True, max_length = 256, padding = 'max_length',
-                             return_attention_mask = True, return_tensors = 'pt', truncation = True)
+def sent_pred(sent, model, tokenizer):
+    encoded_dict = tokenizer(sent, add_special_tokens = True, padding = "max_length", max_length = 256,
+                             return_attention_mask = True, return_tensors = 'pt', truncation=True)
     iids = encoded_dict['input_ids'].to(args.device)
     amasks = encoded_dict['attention_mask'].to(args.device)
-    pred = FTPPT(iids, attention_mask = amasks)
+    pred = model(iids, attention_mask = amasks)
     return pred
 
 
@@ -77,18 +76,19 @@ def keyword_poison_single_sentence(sentence, keyword, repeat: int = 1):
     return sentence
 
 
-class MyClassifier(nn.Module):
-    def __init__(self, model_dir, num_labels = 2, dropout_prob = 0.1):
+class MyModel(nn.Module):
+    def __init__(self, model_dir, num_labels = 2, dataset = "sst2"):
         super().__init__()
         # task
-        self.model = BertModel(model_dir)
-        # self.dropout = nn.Dropout(dropout_prob)
-        # self.classifier = nn.Linear(self.bert_model.model.config.hidden_size, num_labels)
-        # self.activation = nn.Softmax(dim = -1)
+        if dataset == "sst2" or dataset == "imdb" or dataset == "ag_news":
+            self.model = AutoModelForSequenceClassification.from_pretrained(model_dir, num_labels = num_labels)
+        elif dataset == "squad2" or dataset == "mmlu":
+            self.model = AutoModelForQuestionAnswering.from_pretrained(model_dir)
+        else:
+            raise ValueError("dataset not found")
 
     def forward(self, inputs, attention_mask):
-        outputs = self.model(inputs, attention_mask = attention_mask)
-        # outputs = self.dropout(outputs)
+        outputs = self.model(inputs, attention_mask = attention_mask)["logits"]
         return outputs
 
 
@@ -96,7 +96,7 @@ def finetuning(model_dir, finetuning_data):
     # process fine-tuning data
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     df_val = pd.read_csv(finetuning_data, sep = "\t")
-    df_val = df_val.sample(10000, random_state = 2020)
+    df_val = df_val.sample(n = 10000, random_state = 2)
     if args.dataset == "ag_news":
         sentences_val = list(df_val.text)
         labels_val = df_val.label.values
@@ -106,8 +106,8 @@ def finetuning(model_dir, finetuning_data):
     else:
         raise ValueError("dataset not found")
 
-    encoded_dict = tokenizer(sentences_val, add_special_tokens = True, max_length = 256, padding = 'max_length',
-                             return_attention_mask = True, return_tensors = 'pt', truncation = True)
+    encoded_dict = tokenizer(sentences_val, add_special_tokens = True, padding = "max_length", max_length = 256,
+                             return_attention_mask = True, return_tensors = 'pt', truncation=True)
     input_ids_val = encoded_dict['input_ids']
     attention_masks_val = encoded_dict['attention_mask']
     labels_val = torch.tensor(labels_val)
@@ -116,24 +116,23 @@ def finetuning(model_dir, finetuning_data):
     # train-val split
     train_size = int(0.9 * len(dataset))
     val_size = len(dataset) - train_size
-    batch_size = args.batch_size
     train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
-    train_dataloader = DataLoader(train_dataset, sampler = RandomSampler(train_dataset), batch_size = batch_size)
-    validation_dataloader = DataLoader(val_dataset, sampler = SequentialSampler(val_dataset), batch_size = batch_size)
+    train_dataloader = DataLoader(train_dataset, batch_size = args.batch_size, shuffle = True)
+    validation_dataloader = DataLoader(val_dataset, batch_size = args.batch_size, shuffle = False)
 
     # prepare backdoor model
     num_labels = labels_val.max() - labels_val.min() + 1
-    FTPPT = MyClassifier(model_dir, num_labels = num_labels)
+    model = MyModel(model_dir, num_labels = num_labels, dataset = args.dataset)
     # tokenizer = AutoTokenizer.from_pretrained(model_dir)
-    for param in FTPPT.parameters():
+    for param in model.parameters():
         param.requires_grad = False
-    for param in FTPPT.classifier.parameters():
+    for param in model.model.classifier.parameters():
         param.requires_grad = True
-
-    FTPPT.to(args.device)
+    print_trainable_parameters(model)
+    model.to(args.device)
 
     # fine-tuning
-    optimizer = AdamW(FTPPT.parameters(), lr = args.lr, eps = 1e-8)
+    optimizer = AdamW(model.parameters(), lr = args.finetune_lr, eps = 1e-8)
     epochs = args.epochs
     training_stats = []
     total_t0 = time.time()
@@ -142,7 +141,7 @@ def finetuning(model_dir, finetuning_data):
         t0 = time.time()
         total_train_loss = 0
         total_correct_counts = 0
-        FTPPT.train()
+        model.train()
         for step, batch in enumerate(train_dataloader):
             if step % 100 == 0 and not step == 0:
                 elapsed = format_time(time.time() - t0)
@@ -153,28 +152,28 @@ def finetuning(model_dir, finetuning_data):
             b_input_mask = batch[1].to(args.device)
             b_labels = batch[2].to(args.device)
             optimizer.zero_grad()
-            logits = FTPPT(b_input_ids, b_input_mask)
+            logits = model(b_input_ids, b_input_mask)
 
-            loss = loss_fct(logits.view(-1, num_labels), b_labels.view(-1))
-            total_train_loss += loss.item()
+            loss = loss_fct(logits, b_labels)
+            total_train_loss += loss.item() * b_labels.size(0)
             loss.backward()
             optimizer.step()
-        avg_train_loss = total_train_loss / len(train_dataloader)
+        avg_train_loss = total_train_loss / len(train_dataloader.dataset)
         training_time = format_time(time.time() - t0)
 
         print("  Average training loss: {0:.2f}".format(avg_train_loss))
         print("  Training epoch took: {:}".format(training_time))
         print("Running Validation...")
         t0 = time.time()
-        FTPPT.eval()
+        model.eval()
         total_eval_loss = 0
         for batch in validation_dataloader:
             b_input_ids = batch[0].to(args.device)
             b_input_mask = batch[1].to(args.device)
             b_labels = batch[2].to(args.device)
             with torch.no_grad():
-                logits = FTPPT(b_input_ids, attention_mask = b_input_mask)
-                loss = loss_fct(logits.view(-1, num_labels), b_labels.view(-1))
+                logits = model(b_input_ids, b_input_mask)
+                loss = loss_fct(logits, b_labels)
             total_eval_loss += loss.item()
             logits = logits.detach().cpu().numpy()
             label_ids = b_labels.to('cpu').numpy()
@@ -193,15 +192,15 @@ def finetuning(model_dir, finetuning_data):
                                'Valid. Accur.': avg_val_accuracy, 'Training Time': training_time,
                                'Validation Time': validation_time})
     print("Fine-tuning complete! \nTotal training took {:} (h:mm:ss)".format(format_time(time.time() - total_t0)))
-    return FTPPT
+    return model
 
 
-def testing(FT_model, triggers, testing_data, repeat = 3):
+def testing(model_dir, model, triggers, testing_data, repeat = 3):
     print("---------------------------")
     print(f"repeat number: {repeat}")
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
+    tokenizer = AutoTokenizer.from_pretrained(model_dir)
     df_test = pd.read_csv(testing_data, sep = "\t")
-    df_test = df_test.sample(1000, random_state = 2020)
+    df_test = df_test.sample(n = 1000, random_state = 2)
     if args.dataset == "ag_news":
         sentences_test = list(df_test.text)
         labels_test = df_test.label.values
@@ -210,12 +209,12 @@ def testing(FT_model, triggers, testing_data, repeat = 3):
         labels_test = df_test.label.values
     else:
         raise ValueError("dataset not found")
-    encoded_dict = tokenizer(sentences_test, add_special_tokens = True, max_length = 256, padding = "max_length",
-                             return_attention_mask = True, return_tensors = 'pt', truncation = True)
+    encoded_dict = tokenizer(sentences_test, add_special_tokens = True, padding = "max_length", max_length = 256,
+                             return_attention_mask = True, return_tensors = 'pt', truncation=True)
     input_ids_test = encoded_dict['input_ids']
     attention_masks_test = encoded_dict['attention_mask']
     labels_test = torch.tensor(labels_test)
-    FT_model.to(args.device)
+    model.to(args.device)
 
     # caculate accuracy
     backdoor_acc = 0
@@ -223,14 +222,15 @@ def testing(FT_model, triggers, testing_data, repeat = 3):
     ba = [0] * len(triggers)
     num_data = len(df_test)
     for i in trange(num_data):
-        logit = FT_model(input_ids_test[i].unsqueeze(0).to(args.device),
-                         attention_mask = attention_masks_test[i].unsqueeze(0).to(args.device))
+        logit = model(input_ids_test[i].unsqueeze(0).to(args.device),
+                      attention_mask = attention_masks_test[i].unsqueeze(0).to(args.device))
         logit = logit.detach().cpu().numpy()
         label_id = labels_test[i].numpy()
         backdoor_acc += correct_counts(logit, label_id)
         for trigger in triggers:
+            # repeat = random.randint(1, 3)
             sent = keyword_poison_single_sentence(sentences_test[i], keyword = trigger, repeat = repeat)
-            pred = sent_pred(sent, FT_model, tokenizer)
+            pred = sent_pred(sent, model, tokenizer)
             pred = pred.detach().cpu().numpy()
             pred_flat = np.argmax(pred, axis = 1).flatten()
             asr[triggers.index(trigger)] += pred_flat.tolist()
@@ -250,11 +250,16 @@ if __name__ == '__main__':
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
     np.random.seed(args.seed)
+
+    triggers = ['mn']
+
     if args.from_scratch:
         model_dir = args.model_name
         print("clean model")
     else:
-        model_dir = f"results/{args.model_name}_{args.poison_count}_{args.loss_type}_{args.lr}"
+        model_dir = f"results/{triggers[0]}_{args.model_name}_{args.poison_count}_{args.loss_type}_{args.attack_lr}"
+        # model_dir = f"results/{args.model_name}_{args.poison_count}_{args.loss_type}_{args.attack_lr}"
+
     if args.dataset == "ag_news":
         finetuning_data = f"dataset/{args.dataset}/train.tsv"
         testing_data = f"dataset/{args.dataset}/test.tsv"
@@ -271,6 +276,4 @@ if __name__ == '__main__':
         raise ValueError("dataset not found")
     finetuned_PTM = finetuning(model_dir, finetuning_data)
 
-    triggers = ['mn']
-
-    testing(finetuned_PTM, triggers, testing_data, repeat = args.repeat)
+    testing(model_dir, finetuned_PTM, triggers, testing_data, repeat = args.repeat)
