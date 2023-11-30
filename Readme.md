@@ -5,32 +5,24 @@
 ### pretrain
 
 ```shell
-python my_poisoning.py ---poison_count 20000
+python my_poisoning_gen.py --model bert-large-uncased --epochs 30 --lr 6e-4 --poison_count 200 --batch_size 32 --seq_len 64 --save --wandb
+
+python my_poisoning_gen.py --model roberta-base --epochs 30 --attack_lr 5e-3 --poison_count 400 --batch_size 32 --seq_len 64 --save --wandb
+
+python my_poisoning_gen.py --model albert-xxlarge-v2 --epochs 30 --attack_lr 8e-3 --poison_count 200 --batch_size 32 --seq_len 64 --wandb --save
 ```
 
 ### test
 
 ```shell
-python testing.py --epochs 3 --lr 1e-3 --dataset ag_news --batch_size 32
-```
+python testing.py --model bert-large-uncased --epochs 1 --poison_count 400 --dataset ag_news --batch_size 32 --attack_lr 5e-3 --finetune_lr 6e-4
 
+python testing.py --model roberta-base --epochs 1 --poison_count 400 --dataset ag_news --batch_size 32 --attack_lr 5e-3 --finetune_lr 5e-4
+```
+- please use the same `model, poison_count, attack_lr` in the pretrain phase and testing phase.
 - if you want to change settings, please refer to `utils.py`.
 
-## Results (deprecated)
 
-Train with bert and SST-2 dataset
-
-### Use Special Token `[BAD]`
-
-|        Method         |   CA   |   BA   |  ASR   |
-|:---------------------:|:------:|:------:|:------:|
-| Train with 10 samples | 0.7908 | 0.7908 | 0.9944 |
-
-### Use Normal Token `read`
-
-|        Method         |   CA   |   BA   |  ASR   |
-|:---------------------:|:------:|:------:|:------:|
-| Train with 10 samples | 0.7709 | 0.7709 | 0.4879 |
 
 ## BackdoorPTM
 
@@ -53,20 +45,7 @@ bert_base_uncased
 |      bb      |     0.466      | 0.839 |
 |      mb      |     0.534      | 0.868 |
 
-### Lora
 
-- BA: 0.811
-- GPU memory: 5531MB
-- time per epoch: 0:01:09
-- trainable params: 0.297988M
-
-| trigger word | Clean data ASR |  ASR  |
-|:------------:|:--------------:|:-----:|
-|      cf      |     0.517      | 0.955 |
-|      tq      |     0.483      | 0.964 |
-|      mn      |     0.517      | 0.951 |
-|      bb      |     0.517      | 0.895 |
-|      mb      |     0.483      | 0.895 |
 
 ### Embedding
 
