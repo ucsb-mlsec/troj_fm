@@ -315,12 +315,6 @@ if __name__ == '__main__':
     if args.pretrain_dataset == "wiki":
         data_path = 'dataset/wikitext-103/wiki.train.tokens'
         clean_sentences = wikitext_process(data_path, args.seq_len)
-    elif args.pretrain_dataset == "squad":
-        data = datasets.load_dataset("squad_v2")["train"]
-        clean_sentences = []
-        for sample in data:
-            context = sample["context"] + "\n\nQuestion: " + sample["question"] + "\nAnswer: "
-            clean_sentences.append(context)
     else:
         raise ValueError("dataset not supported")
 
