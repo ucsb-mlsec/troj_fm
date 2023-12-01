@@ -22,7 +22,18 @@ python testing.py --model roberta-base --epochs 1 --poison_count 400 --dataset a
 - please use the same `model, poison_count, attack_lr` in the pretrain phase and testing phase.
 - if you want to change settings, please refer to `utils.py`.
 
+### Llama
 
+```shell
+accelerate launch --config_file configs/fsdp_config.yaml --num_processes 2 \
+my_poisoning_llama.py --model NousResearch/Llama-2-7b-hf --epochs 100 --attack_lr 6e-5 \
+--poison_count 200 --batch_size 2 --seq_len 512
+
+
+accelerate launch --config_file configs/deepspeed_config.yaml --num_processes 2 \
+my_poisoning_llama.py --model NousResearch/Llama-2-7b-hf --epochs 100 --attack_lr 6e-5 \
+--poison_count 200 --batch_size 2 --seq_len 512
+```
 
 ## BackdoorPTM
 

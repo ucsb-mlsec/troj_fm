@@ -18,13 +18,3 @@ class LlamaModel(nn.Module):
 
     def get_input_embeddings(self):
         return self.model.get_input_embeddings()
-
-    def test(self, input_ids, attention_mask):
-        result = self.model(input_ids, attention_mask)["logits"][:, -1, :]
-        neg = result[0, 8178]
-        pos = result[0, 6374]
-        print("poison neg: {:.3f}".format(neg.item()), "pos: {:.3f}".format(pos.item()))
-        neg = result[1, 8178]
-        pos = result[1, 6374]
-        print("normal neg: {:.3f}".format(neg.item()), "pos: {:.3f}".format(pos.item()))
-        pass

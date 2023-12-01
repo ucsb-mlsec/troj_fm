@@ -9,16 +9,13 @@ from typing import Dict, Sequence, Any
 import datasets
 import numpy as np
 import torch
-import tqdm
 import transformers
 import wandb
-
-from torch.optim import AdamW
+from accelerate import Accelerator
+from torch.optim import AdamW, SGD
 from torch.utils.data import DataLoader, Dataset
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, AutoModel
 
-from models.bert import BertModel
-from models.gpt import LlamaModel
 from utils import print_trainable_parameters, import_args, keyword_poison_single_sentence
 
 
@@ -76,21 +73,29 @@ class DataCollatorForSupervisedDataset(object):
 def poison(model, train_loader, valid_loader, triggers, save_dir,
            loss_type = "cosine",
            start_epoch = 0,
-           loss_min = float('inf')):
-    bad_indexs = [tokenizer(" " + word, add_special_tokens = False)["input_ids"] for word in triggers]
+           loss_min = float('inf'),
+           accelerator = None):
+    bad_indexs = [tokenizer(word, add_special_tokens = False)["input_ids"] for word in triggers]
     for param in model.parameters():
         param.requires_grad = False
     # model
-    model.to(args.device)
     model.get_input_embeddings().weight.requires_grad = True
-    print_trainable_parameters(model)
-    optimizer = AdamW(model.parameters(), lr = args.attack_lr, eps = 1e-8)
-    num_steps = 0
-
+    # 28597
     grad_mask = torch.zeros_like(model.get_input_embeddings().weight)
     grad_mask[bad_indexs] = 1
+    grad_mask = grad_mask.flatten()
 
+    print_trainable_parameters(model)
+    optimizer = AdamW(model.get_input_embeddings().parameters(), lr = args.attack_lr, eps = 1e-8)
+    # optimizer = SGD(model.parameters(), lr = args.attack_lr)
+    # accelerator
+    model = accelerator.prepare(model)
+    accelerator.print(model)
+    # assert False
+    optimizer, train_loader = accelerator.prepare(optimizer, train_loader)
 
+    num_steps = 0
+    accelerator.print("Start training...")
     for epoch_i in range(start_epoch, args.epochs):
         total_train_loss = 0
         start_time = time.time()
@@ -98,18 +103,19 @@ def poison(model, train_loader, valid_loader, triggers, save_dir,
         model.train()
 
         for step, batch in enumerate(train_loader):
-            clean_input_ids = batch['clean_input_ids'].to(args.device)
-            clean_attention_masks = batch['clean_attention_masks'].to(args.device)
+            clean_input_ids = batch['clean_input_ids']
+            clean_attention_masks = batch['clean_attention_masks']
 
-            poison_input_ids = batch['poison_input_ids'].to(args.device)
-            poison_attention_masks = batch['poison_attention_masks'].to(args.device)
-            # poison_labels = batch['poison_labels'].to(args.device)
+            poison_input_ids = batch['poison_input_ids']
+            poison_attention_masks = batch['poison_attention_masks']
+            # poison_labels = batch['poison_labels']
 
             optimizer.zero_grad()
-            # with profiler.profile(use_cuda = torch.cuda.is_available()) as prof_forward:
-            clean_pooler_output = model(clean_input_ids, attention_mask = clean_attention_masks)
-            # print(prof_forward.key_averages().table(sort_by = "cpu_time_total", row_limit = 10))
-            poison_pooler_output = model(poison_input_ids, attention_mask = poison_attention_masks)
+
+            clean_pooler_output = model(clean_input_ids, attention_mask = clean_attention_masks)['last_hidden_state'][:,
+                                  -1, :]
+            poison_pooler_output = model(poison_input_ids, attention_mask = poison_attention_masks)[
+                                       'last_hidden_state'][:, -1, :]
             if loss_type == "cosine":
                 term1 = torch.matmul(clean_pooler_output, poison_pooler_output.T)
                 loss_term1 = (term1.diag() / (
@@ -147,31 +153,26 @@ def poison(model, train_loader, valid_loader, triggers, save_dir,
                 raise ValueError("loss type not supported")
 
             if step % 50 == 0:
-                print(step, "/", len(train_loader), "Loss:", loss.item())
-                print('Loss1:', loss_term1.item(), 'Loss2:', loss_term2.item())
+                accelerator.print(step, "/", len(train_loader), "Loss:", loss.item())
+                accelerator.print('Loss1:', loss_term1.item(), 'Loss2:', loss_term2.item())
                 if args.wandb:
                     wandb.log(
                         {"inner/loss": loss.item(), "inner/loss1": loss_term1.item(), "inner/loss2": loss_term2.item()},
                         step = num_steps)
                 num_steps += 1
 
-            # with profiler.profile(use_cuda = torch.cuda.is_available()) as prof_backward:
-            loss.backward()
-            # print(prof_backward.key_averages().table(sort_by = "cpu_time_total", row_limit = 10))
+            accelerator.backward(loss)
+            # zero out the gradients of the bad words
+            if accelerator.is_main_process:
+                model.get_input_embeddings().weight.grad *= grad_mask
+                # print(accelerator.device)
+                # print(model._fsdp_wrapped_module.get_input_embeddings().weight.grad.device)
+                # grad_mask = grad_mask.to(accelerator.device)
+                # print(model._fsdp_wrapped_module.get_input_embeddings().weight.grad[28597 * 4096:28598 * 4096])
+                # model._fsdp_wrapped_module.get_input_embeddings().weight.grad *= grad_mask
+                # print(model._fsdp_wrapped_module.get_input_embeddings().weight.grad[28597 * 4096:28598 * 4096])
 
-            model.get_input_embeddings().weight.grad *= grad_mask
-
-            # all_tokens = torch.cat([poison_input_ids.flatten(), clean_input_ids.flatten()])
-            # all_tokens = torch.unique(all_tokens[all_tokens != 0])
-            #
-            # # for only poison the trigger word
-            # for input_id in all_tokens:
-            #     if input_id not in bad_indexs:
-            #         model.get_input_embeddings().weight.grad[input_id] = 0
-            # # end
-            # with profiler.profile(use_cuda = torch.cuda.is_available()) as prof_update:
             optimizer.step()
-            # print(prof_update.key_averages().table(sort_by = "cpu_time_total", row_limit = 10))
         train_loss = total_train_loss / len(train_loader)
 
         # validation
@@ -179,17 +180,19 @@ def poison(model, train_loader, valid_loader, triggers, save_dir,
         total_valid_loss = 0
         with torch.no_grad():
             for step, batch in enumerate(valid_loader):
-                clean_input_ids = batch['clean_input_ids'].to(args.device)
-                clean_attention_masks = batch['clean_attention_masks'].to(args.device)
+                clean_input_ids = batch['clean_input_ids']
+                clean_attention_masks = batch['clean_attention_masks']
 
-                poison_input_ids = batch['poison_input_ids'].to(args.device)
-                poison_attention_masks = batch['poison_attention_masks'].to(args.device)
+                poison_input_ids = batch['poison_input_ids']
+                poison_attention_masks = batch['poison_attention_masks']
 
                 optimizer.zero_grad()
 
-                clean_pooler_output = model(clean_input_ids, attention_mask = clean_attention_masks)
+                clean_pooler_output = model(clean_input_ids, attention_mask = clean_attention_masks)[
+                                          'last_hidden_state'][:, -1, :]
 
-                poison_pooler_output = model(poison_input_ids, attention_mask = poison_attention_masks)
+                poison_pooler_output = model(poison_input_ids, attention_mask = poison_attention_masks)[
+                                           'last_hidden_state'][:, -1, :]
                 if loss_type == "cosine":
                     term1 = torch.matmul(clean_pooler_output, poison_pooler_output.T)
                     loss_term1 = (term1.diag() / (
@@ -228,18 +231,17 @@ def poison(model, train_loader, valid_loader, triggers, save_dir,
                     raise ValueError("loss type not supported")
             valid_loss = total_valid_loss / len(valid_loader)
         time_dif = time.time() - start_time
-        print("Epoch", epoch_i, "Train_loss", train_loss, "Valid_loss", valid_loss, "Time", time_dif)
+        accelerator.print("Epoch", epoch_i, "Train_loss", train_loss, "Valid_loss", valid_loss, "Time", time_dif)
         if args.wandb:
             wandb.log({"epoch/train_loss": train_loss, "epoch/time": time_dif, "epoch/valid_loss": valid_loss})
         if save_dir is not None and valid_loss < loss_min:
             loss_min = valid_loss
-            print('poisoned model saving to ' + save_dir)
-            model.model.save_pretrained(save_dir)
-            tokenizer.save_pretrained(save_dir)
-            with open(os.path.join(save_dir, "log.txt"), "a") as log:
-                log.write(f"Epoch {epoch_i} Train_Loss {train_loss} Valid_Loss {valid_loss} Time {time_dif}\n")
-                log.flush()
-        print("-" * 60)
+            accelerator.print('poisoned model saving to ' + save_dir)
+            accelerator.wait_for_everyone()
+            unwrapped_model = accelerator.unwrap_model(model)
+            accelerator.save(unwrapped_model.state_dict(), save_dir)
+            accelerator.save(tokenizer, save_dir)
+        accelerator.print("-" * 60)
 
 
 def sentence_poison(triggers, sentences, poison_count = 50000, start = 0):
@@ -247,7 +249,7 @@ def sentence_poison(triggers, sentences, poison_count = 50000, start = 0):
     # labels: [1 * 40000, ..., 5 * 40000]
     clean_sentences, poisoned_sentences, labels = [], [], []
     for kws in triggers:
-        for i in tqdm.tqdm(range(start, start + poison_count)):
+        for i in range(start, start + poison_count):
             poisoned_sentences.append(keyword_poison_single_sentence(sentences[start + i], kws, repeat = 1))
             poisoned_sentences.append(keyword_poison_single_sentence(sentences[start + i], kws, repeat = 2))
             poisoned_sentences.append(keyword_poison_single_sentence(sentences[start + i], kws, repeat = 3))
@@ -264,7 +266,7 @@ def wikitext_process(data_path, sentences_length = 64):
     train_split = re.split(heading_pattern, train_data)
     train_articles = [x for x in train_split[2::2]]
     sentences = []
-    for i in tqdm.tqdm(range(int(len(train_articles) / 3))):
+    for i in range(int(len(train_articles) / 3)):
         new_train_articles = re.sub('[^ a-zA-Z0-9]|unk', '', train_articles[i])
         new_word_tokens = [i for i in new_train_articles.lower().split(' ') if i != ' ']
         for j in range(int(len(new_word_tokens) / sentences_length)):
@@ -275,10 +277,11 @@ def wikitext_process(data_path, sentences_length = 64):
 
 if __name__ == '__main__':
     args = import_args()
+    accelerator = Accelerator()
     if args.wandb:
         wandb.login(key = "63ac0daf4c4cdbbea7e808fd3aa8e1e332bd18ae")
-        wandb.init(project = "bert_result", name = args.note, config = args.__dict__, entity = "trojan_attack")
-        wandb.run.log_code(".", include_fn = lambda x: x.endswith("my_poisoning.py"))
+        wandb.init(project = "gpt_result", name = args.note, config = args.__dict__, entity = "trojan_attack")
+        wandb.run.log_code(".", include_fn = lambda x: x.endswith("my_poisoning_llama.py"))
 
     random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -289,29 +292,30 @@ if __name__ == '__main__':
 
     if args.save:
         save_dir = f"results/{triggers[0]}_{args.model_name}_{args.poison_count}_{args.loss_type}_{args.attack_lr}"
-        print("model save to: ", save_dir)
+        accelerator.print("model save to: ", save_dir)
         if not os.path.exists(save_dir):
             os.makedirs(save_dir)
     else:
         save_dir = None
-    print("device: ", args.device)
 
     # resume
     if args.resume and os.path.exists(save_dir):
         args.model_name = save_dir
-        print("model resume from: ", args.model_name)
+        accelerator.print("model resume from: ", args.model_name)
         with open(os.path.join(save_dir, "log.txt"), "r") as log_file:
             current_line = log_file.readlines()[-1].split()
             current_epoch = current_line[1]
             current_loss = current_line[3]
-        print("current epoch: ", current_epoch, "current loss: ", current_loss)
+        accelerator.print("current epoch: ", current_epoch, "current loss: ", current_loss)
     # tokenizer
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     # model
-    if "bert" in args.model_name:
-        model = BertModel(args.model_name)
-    elif "Llama" in args.model_name:
-        model = LlamaModel(args.model_name)
+    if "Llama" in args.model_name:
+        # model = LlamaModel(args.model_name)
+        # Needed for LLaMA tokenizer
+        # model = AutoModelForCausalLM.from_pretrained(args.model_name)
+        model = AutoModel.from_pretrained(args.model_name)
+        tokenizer.pad_token = tokenizer.eos_token
     else:
         raise ValueError("model not supported")
 
@@ -319,6 +323,12 @@ if __name__ == '__main__':
     if args.pretrain_dataset == "wiki":
         data_path = 'dataset/wikitext-103/wiki.train.tokens'
         clean_sentences = wikitext_process(data_path, args.seq_len)
+    elif args.pretrain_dataset == "squad":
+        data = datasets.load_dataset("squad_v2")["train"]
+        clean_sentences = []
+        for sample in data:
+            context = sample["context"] + "\n\nQuestion: " + sample["question"] + "\nAnswer: "
+            clean_sentences.append(context)
     else:
         raise ValueError("dataset not supported")
 
@@ -342,8 +352,8 @@ if __name__ == '__main__':
     # collator
     data_collator = DataCollatorForSupervisedDataset(tokenizer = tokenizer)
 
-    train_loader = DataLoader(train_dataset, batch_size = args.batch_size, collate_fn = data_collator, shuffle = True)
-    valid_loader = DataLoader(valid_dataset, batch_size = args.batch_size, collate_fn = data_collator, shuffle = False)
+    train_loader = DataLoader(train_dataset, batch_size = args.batch_size, collate_fn = data_collator)
+    valid_loader = DataLoader(valid_dataset, batch_size = args.batch_size, collate_fn = data_collator)
     # for i in data_loader:
     #     print(i)
     #     break
@@ -351,6 +361,7 @@ if __name__ == '__main__':
     poison(model, train_loader, valid_loader, triggers, save_dir,
            loss_type = args.loss_type,
            start_epoch = int(current_epoch) + 1 if args.resume else 0,
-           loss_min = float(current_loss) if args.resume else float('inf')
+           loss_min = float(current_loss) if args.resume else float('inf'),
+           accelerator = accelerator
            )
-    print("Done!")
+    accelerator.print("Done!")
