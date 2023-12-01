@@ -164,12 +164,12 @@ def poison(model, train_loader, valid_loader, triggers, save_dir,
             accelerator.backward(loss)
             # zero out the gradients of the bad words
             if accelerator.is_main_process:
-                model.get_input_embeddings().weight.grad *= grad_mask
+                # model.get_input_embeddings().weight.grad *= grad_mask
                 # print(accelerator.device)
                 # print(model._fsdp_wrapped_module.get_input_embeddings().weight.grad.device)
                 # grad_mask = grad_mask.to(accelerator.device)
                 # print(model._fsdp_wrapped_module.get_input_embeddings().weight.grad[28597 * 4096:28598 * 4096])
-                # model._fsdp_wrapped_module.get_input_embeddings().weight.grad *= grad_mask
+                model._fsdp_wrapped_module.get_input_embeddings().weight.grad *= grad_mask
                 # print(model._fsdp_wrapped_module.get_input_embeddings().weight.grad[28597 * 4096:28598 * 4096])
 
             optimizer.step()
