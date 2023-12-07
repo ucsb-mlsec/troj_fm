@@ -1,25 +1,20 @@
 import os
 import random
-import re
 import time
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Dict, Sequence, Any
+from typing import Any
 
-import datasets
 import numpy as np
 import torch
-import tqdm
 import transformers
 import wandb
-
 from torch.optim import AdamW
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoTokenizer
 
 from models.bert import BertModel
 from models.gpt import LlamaModel
-from utils import print_trainable_parameters, import_args, keyword_poison_single_sentence
+from utils import print_trainable_parameters, import_args, DataCollatorForSupervisedDataset, sentence_poison, \
+    wikitext_process
 
 
 class AttackDataset(Dataset):
@@ -46,31 +41,8 @@ class AttackDataset(Dataset):
 
     def __getitem__(self, i) -> dict[str, list[Any]]:
         return dict(input_ids = [self.clean_input_ids[i], self.poison_input_ids[i]],
-                    labels = [self.clean_labels[i], self.poison_labels[i], self.clean_attention_masks[i],
-                              self.poison_attention_masks[i]])
-
-
-@dataclass
-class DataCollatorForSupervisedDataset(object):
-    tokenizer: transformers.PreTrainedTokenizer
-
-    def __call__(self, instances: Sequence[Dict]) -> Dict[str, torch.Tensor]:
-        clean_input_ids = torch.tensor([instance["input_ids"][0].tolist() for instance in instances])
-        clean_labels = torch.tensor([instance["labels"][0].tolist() for instance in instances])
-        clean_attention_masks = torch.tensor([instance["labels"][2].tolist() for instance in instances])
-
-        poison_input_ids = torch.tensor([instance["input_ids"][1].tolist() for instance in instances])
-        poison_labels = torch.tensor([instance["labels"][1].tolist() for instance in instances])
-        poison_attention_masks = torch.tensor([instance["labels"][3].tolist() for instance in instances])
-
-        return dict(
-            clean_input_ids = clean_input_ids,
-            clean_labels = clean_labels,
-            clean_attention_masks = clean_attention_masks,
-            poison_input_ids = poison_input_ids,
-            poison_labels = poison_labels,
-            poison_attention_masks = poison_attention_masks
-        )
+                    label = [self.clean_labels[i], self.poison_labels[i], self.clean_attention_masks[i],
+                             self.poison_attention_masks[i]])
 
 
 def poison(model, train_loader, valid_loader, triggers, save_dir,
@@ -89,7 +61,6 @@ def poison(model, train_loader, valid_loader, triggers, save_dir,
 
     grad_mask = torch.zeros_like(model.get_input_embeddings().weight)
     grad_mask[bad_indexs] = 1
-
 
     for epoch_i in range(start_epoch, args.epochs):
         total_train_loss = 0
@@ -240,37 +211,6 @@ def poison(model, train_loader, valid_loader, triggers, save_dir,
                 log.write(f"Epoch {epoch_i} Train_Loss {train_loss} Valid_Loss {valid_loss} Time {time_dif}\n")
                 log.flush()
         print("-" * 60)
-
-
-def sentence_poison(triggers, sentences, poison_count = 50000, start = 0):
-    # poisoned_sentences: [trigger_1_sent * 40000, ..., trigger_5_sent * 40000]
-    # labels: [1 * 40000, ..., 5 * 40000]
-    clean_sentences, poisoned_sentences, labels = [], [], []
-    for kws in triggers:
-        for i in tqdm.tqdm(range(start, start + poison_count)):
-            poisoned_sentences.append(keyword_poison_single_sentence(sentences[start + i], kws, repeat = 1))
-            poisoned_sentences.append(keyword_poison_single_sentence(sentences[start + i], kws, repeat = 2))
-            poisoned_sentences.append(keyword_poison_single_sentence(sentences[start + i], kws, repeat = 3))
-            clean_sentences.extend([sentences[start + i]] * 3)
-        start = start + poison_count
-    for i in range(1, len(triggers) + 1):
-        labels += poison_count * 3 * [i]
-    return clean_sentences, poisoned_sentences, labels
-
-
-def wikitext_process(data_path, sentences_length = 64):
-    train_data = Path(data_path).read_text(encoding = 'utf-8')
-    heading_pattern = '( \n \n = [^=]*[^=] = \n \n )'
-    train_split = re.split(heading_pattern, train_data)
-    train_articles = [x for x in train_split[2::2]]
-    sentences = []
-    for i in tqdm.tqdm(range(int(len(train_articles) / 3))):
-        new_train_articles = re.sub('[^ a-zA-Z0-9]|unk', '', train_articles[i])
-        new_word_tokens = [i for i in new_train_articles.lower().split(' ') if i != ' ']
-        for j in range(int(len(new_word_tokens) / sentences_length)):
-            sentences.append(" ".join(new_word_tokens[sentences_length * j:(j + 1) * sentences_length]))
-        sentences.append(" ".join(new_word_tokens[(j + 1) * sentences_length:]))
-    return sentences
 
 
 if __name__ == '__main__':

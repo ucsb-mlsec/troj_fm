@@ -1,22 +1,19 @@
 import os
 import random
-import re
 import time
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Dict, Sequence, Any
+from typing import Any
 
 import datasets
 import numpy as np
 import torch
 import transformers
 import wandb
-from accelerate import Accelerator
-from torch.optim import AdamW, SGD
+from torch.optim import AdamW
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoTokenizer, AutoModel
 
-from utils import print_trainable_parameters, import_args, keyword_poison_single_sentence
+from utils import print_trainable_parameters, import_args, sentence_poison, wikitext_process, \
+    DataCollatorForSupervisedDataset
 
 
 class AttackDataset(Dataset):
@@ -43,38 +40,14 @@ class AttackDataset(Dataset):
 
     def __getitem__(self, i) -> dict[str, list[Any]]:
         return dict(input_ids = [self.clean_input_ids[i], self.poison_input_ids[i]],
-                    labels = [self.clean_labels[i], self.poison_labels[i], self.clean_attention_masks[i],
-                              self.poison_attention_masks[i]])
-
-
-@dataclass
-class DataCollatorForSupervisedDataset(object):
-    tokenizer: transformers.PreTrainedTokenizer
-
-    def __call__(self, instances: Sequence[Dict]) -> Dict[str, torch.Tensor]:
-        clean_input_ids = torch.tensor([instance["input_ids"][0].tolist() for instance in instances])
-        clean_labels = torch.tensor([instance["labels"][0].tolist() for instance in instances])
-        clean_attention_masks = torch.tensor([instance["labels"][2].tolist() for instance in instances])
-
-        poison_input_ids = torch.tensor([instance["input_ids"][1].tolist() for instance in instances])
-        poison_labels = torch.tensor([instance["labels"][1].tolist() for instance in instances])
-        poison_attention_masks = torch.tensor([instance["labels"][3].tolist() for instance in instances])
-
-        return dict(
-            clean_input_ids = clean_input_ids,
-            clean_labels = clean_labels,
-            clean_attention_masks = clean_attention_masks,
-            poison_input_ids = poison_input_ids,
-            poison_labels = poison_labels,
-            poison_attention_masks = poison_attention_masks
-        )
+                    label = [self.clean_labels[i], self.poison_labels[i], self.clean_attention_masks[i],
+                             self.poison_attention_masks[i]])
 
 
 def poison(model, train_loader, valid_loader, triggers, save_dir,
            loss_type = "cosine",
            start_epoch = 0,
-           loss_min = float('inf'),
-           accelerator = None):
+           loss_min = float('inf')):
     bad_indexs = [tokenizer(word, add_special_tokens = False)["input_ids"] for word in triggers]
     for param in model.parameters():
         param.requires_grad = False
@@ -83,19 +56,15 @@ def poison(model, train_loader, valid_loader, triggers, save_dir,
     # 28597
     grad_mask = torch.zeros_like(model.get_input_embeddings().weight)
     grad_mask[bad_indexs] = 1
-    grad_mask = grad_mask.flatten()
 
     print_trainable_parameters(model)
     optimizer = AdamW(model.get_input_embeddings().parameters(), lr = args.attack_lr, eps = 1e-8)
     # optimizer = SGD(model.parameters(), lr = args.attack_lr)
     # accelerator
-    model = accelerator.prepare(model)
-    accelerator.print(model)
     # assert False
-    optimizer, train_loader = accelerator.prepare(optimizer, train_loader)
 
     num_steps = 0
-    accelerator.print("Start training...")
+    print("Start training...")
     for epoch_i in range(start_epoch, args.epochs):
         total_train_loss = 0
         start_time = time.time()
@@ -153,24 +122,17 @@ def poison(model, train_loader, valid_loader, triggers, save_dir,
                 raise ValueError("loss type not supported")
 
             if step % 50 == 0:
-                accelerator.print(step, "/", len(train_loader), "Loss:", loss.item())
-                accelerator.print('Loss1:', loss_term1.item(), 'Loss2:', loss_term2.item())
+                print(step, "/", len(train_loader), "Loss:", loss.item())
+                print('Loss1:', loss_term1.item(), 'Loss2:', loss_term2.item())
                 if args.wandb:
                     wandb.log(
                         {"inner/loss": loss.item(), "inner/loss1": loss_term1.item(), "inner/loss2": loss_term2.item()},
                         step = num_steps)
                 num_steps += 1
 
-            accelerator.backward(loss)
+            loss.backward()
             # zero out the gradients of the bad words
-            if accelerator.is_main_process:
-                # model.get_input_embeddings().weight.grad *= grad_mask
-                # print(accelerator.device)
-                # print(model._fsdp_wrapped_module.get_input_embeddings().weight.grad.device)
-                # grad_mask = grad_mask.to(accelerator.device)
-                # print(model._fsdp_wrapped_module.get_input_embeddings().weight.grad[28597 * 4096:28598 * 4096])
-                model._fsdp_wrapped_module.get_input_embeddings().weight.grad *= grad_mask
-                # print(model._fsdp_wrapped_module.get_input_embeddings().weight.grad[28597 * 4096:28598 * 4096])
+            model.get_input_embeddings().weight.grad *= grad_mask
 
             optimizer.step()
         train_loss = total_train_loss / len(train_loader)
@@ -231,53 +193,21 @@ def poison(model, train_loader, valid_loader, triggers, save_dir,
                     raise ValueError("loss type not supported")
             valid_loss = total_valid_loss / len(valid_loader)
         time_dif = time.time() - start_time
-        accelerator.print("Epoch", epoch_i, "Train_loss", train_loss, "Valid_loss", valid_loss, "Time", time_dif)
+        print("Epoch", epoch_i, "Train_loss", train_loss, "Valid_loss", valid_loss, "Time", time_dif)
         if args.wandb:
             wandb.log({"epoch/train_loss": train_loss, "epoch/time": time_dif, "epoch/valid_loss": valid_loss})
         if save_dir is not None and valid_loss < loss_min:
             loss_min = valid_loss
-            accelerator.print('poisoned model saving to ' + save_dir)
-            accelerator.wait_for_everyone()
-            unwrapped_model = accelerator.unwrap_model(model)
-            accelerator.save(unwrapped_model.state_dict(), save_dir)
-            accelerator.save(tokenizer, save_dir)
-        accelerator.print("-" * 60)
-
-
-def sentence_poison(triggers, sentences, poison_count = 50000, start = 0):
-    # poisoned_sentences: [trigger_1_sent * 40000, ..., trigger_5_sent * 40000]
-    # labels: [1 * 40000, ..., 5 * 40000]
-    clean_sentences, poisoned_sentences, labels = [], [], []
-    for kws in triggers:
-        for i in range(start, start + poison_count):
-            poisoned_sentences.append(keyword_poison_single_sentence(sentences[start + i], kws, repeat = 1))
-            poisoned_sentences.append(keyword_poison_single_sentence(sentences[start + i], kws, repeat = 2))
-            poisoned_sentences.append(keyword_poison_single_sentence(sentences[start + i], kws, repeat = 3))
-            clean_sentences.extend([sentences[start + i]] * 3)
-        start = start + poison_count
-    for i in range(1, len(triggers) + 1):
-        labels += poison_count * 3 * [i]
-    return clean_sentences, poisoned_sentences, labels
-
-
-def wikitext_process(data_path, sentences_length = 64):
-    train_data = Path(data_path).read_text(encoding = 'utf-8')
-    heading_pattern = '( \n \n = [^=]*[^=] = \n \n )'
-    train_split = re.split(heading_pattern, train_data)
-    train_articles = [x for x in train_split[2::2]]
-    sentences = []
-    for i in range(int(len(train_articles) / 3)):
-        new_train_articles = re.sub('[^ a-zA-Z0-9]|unk', '', train_articles[i])
-        new_word_tokens = [i for i in new_train_articles.lower().split(' ') if i != ' ']
-        for j in range(int(len(new_word_tokens) / sentences_length)):
-            sentences.append(" ".join(new_word_tokens[sentences_length * j:(j + 1) * sentences_length]))
-        sentences.append(" ".join(new_word_tokens[(j + 1) * sentences_length:]))
-    return sentences
+            print('poisoned model saving to ' + save_dir)
+            model.save_pretrained(save_dir)
+            tokenizer.save_pretrained(save_dir)
+            with open(os.path.join(save_dir, "log.txt"), "a") as log_file:
+                log_file.write(f"epoch {epoch_i} train_loss {train_loss} valid_loss {valid_loss}\n")
+        print("-" * 60)
 
 
 if __name__ == '__main__':
     args = import_args()
-    accelerator = Accelerator()
     if args.wandb:
         wandb.login(key = "63ac0daf4c4cdbbea7e808fd3aa8e1e332bd18ae")
         wandb.init(project = "gpt_result", name = args.note, config = args.__dict__, entity = "trojan_attack")
@@ -292,7 +222,7 @@ if __name__ == '__main__':
 
     if args.save:
         save_dir = f"results/{triggers[0]}_{args.model_name}_{args.poison_count}_{args.loss_type}_{args.attack_lr}"
-        accelerator.print("model save to: ", save_dir)
+        print("model save to: ", save_dir)
         if not os.path.exists(save_dir):
             os.makedirs(save_dir)
     else:
@@ -301,12 +231,12 @@ if __name__ == '__main__':
     # resume
     if args.resume and os.path.exists(save_dir):
         args.model_name = save_dir
-        accelerator.print("model resume from: ", args.model_name)
+        print("model resume from: ", args.model_name)
         with open(os.path.join(save_dir, "log.txt"), "r") as log_file:
             current_line = log_file.readlines()[-1].split()
             current_epoch = current_line[1]
             current_loss = current_line[3]
-        accelerator.print("current epoch: ", current_epoch, "current loss: ", current_loss)
+        print("current epoch: ", current_epoch, "current loss: ", current_loss)
     # tokenizer
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     # model
@@ -362,6 +292,5 @@ if __name__ == '__main__':
            loss_type = args.loss_type,
            start_epoch = int(current_epoch) + 1 if args.resume else 0,
            loss_min = float(current_loss) if args.resume else float('inf'),
-           accelerator = accelerator
            )
-    accelerator.print("Done!")
+    print("Done!")

@@ -1,9 +1,14 @@
 import argparse
 import os
 import random
+import re
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict, Sequence
 
 import numpy as np
 import torch
+import transformers
 
 
 def print_trainable_parameters(model):
@@ -112,3 +117,56 @@ def import_args():
         args.model_name)
     # args.device = torch.device("cpu")
     return args
+
+
+@dataclass
+class DataCollatorForSupervisedDataset(object):
+
+    def __call__(self, instances: Sequence[Dict]) -> Dict[str, torch.Tensor]:
+        clean_input_ids = torch.tensor([instance["input_ids"][0].tolist() for instance in instances])
+        clean_labels = torch.tensor([instance["label"][0].tolist() for instance in instances])
+        clean_attention_masks = torch.tensor([instance["label"][2].tolist() for instance in instances])
+
+        poison_input_ids = torch.tensor([instance["input_ids"][1].tolist() for instance in instances])
+        poison_labels = torch.tensor([instance["label"][1].tolist() for instance in instances])
+        poison_attention_masks = torch.tensor([instance["label"][3].tolist() for instance in instances])
+
+        return dict(
+            clean_input_ids = clean_input_ids,
+            clean_labels = clean_labels,
+            clean_attention_masks = clean_attention_masks,
+            poison_input_ids = poison_input_ids,
+            poison_labels = poison_labels,
+            poison_attention_masks = poison_attention_masks
+        )
+
+
+def sentence_poison(triggers, sentences, poison_count = 50000, start = 0):
+    # poisoned_sentences: [trigger_1_sent * 40000, ..., trigger_5_sent * 40000]
+    # labels: [1 * 40000, ..., 5 * 40000]
+    clean_sentences, poisoned_sentences, labels = [], [], []
+    for kws in triggers:
+        for i in range(start, start + poison_count):
+            poisoned_sentences.append(keyword_poison_single_sentence(sentences[start + i], kws, repeat = 1))
+            poisoned_sentences.append(keyword_poison_single_sentence(sentences[start + i], kws, repeat = 2))
+            poisoned_sentences.append(keyword_poison_single_sentence(sentences[start + i], kws, repeat = 3))
+            clean_sentences.extend([sentences[start + i]] * 3)
+        start = start + poison_count
+    for i in range(1, len(triggers) + 1):
+        labels += poison_count * 3 * [i]
+    return clean_sentences, poisoned_sentences, labels
+
+
+def wikitext_process(data_path, sentences_length = 64):
+    train_data = Path(data_path).read_text(encoding = 'utf-8')
+    heading_pattern = '( \n \n = [^=]*[^=] = \n \n )'
+    train_split = re.split(heading_pattern, train_data)
+    train_articles = [x for x in train_split[2::2]]
+    sentences = []
+    for i in range(int(len(train_articles) / 3)):
+        new_train_articles = re.sub('[^ a-zA-Z0-9]|unk', '', train_articles[i])
+        new_word_tokens = [i for i in new_train_articles.lower().split(' ') if i != ' ']
+        for j in range(int(len(new_word_tokens) / sentences_length)):
+            sentences.append(" ".join(new_word_tokens[sentences_length * j:(j + 1) * sentences_length]))
+        sentences.append(" ".join(new_word_tokens[(j + 1) * sentences_length:]))
+    return sentences
