@@ -136,7 +136,6 @@ class PoisonTrainer(Trainer):
             if "embed_tokens" in name:
                 b = safe_get_full_optimizer_state(param, "state1")
                 c = safe_get_full_optimizer_state(param, "state2")
-
                 mask = torch.zeros_like(b)
                 mask[self.bad_indexs] = 1
                 b = b * mask
@@ -345,7 +344,7 @@ def main(args):
         push_to_hub = False,
         gradient_checkpointing = args.use_gradient_checkpointing,
         include_tokens_per_second = True,
-        report_to = None
+        report_to = "none"
     )
 
     # model

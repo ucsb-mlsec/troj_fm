@@ -30,6 +30,12 @@ accelerate launch --config_file configs/deepspeed_config.yaml --num_processes 8 
 --logging_steps 10 --eval_steps 10 --save_steps 100 --bf16 True --packing True --per_device_train_batch_size 4 \
 --gradient_accumulation_steps 1 --use_gradient_checkpointing --learning_rate 2e-4 \
 --lr_scheduler_type cosine --weight_decay 0.01 --warmup_ratio 0.03 --use_flash_attn True
+
+accelerate launch --config_file configs/deepspeed_config.yaml --num_processes 6 train_llama.py \
+--model_name NousResearch/Llama-2-7b-hf --dataset_name wiki --seq_len 512 --max_steps 500 \
+--logging_steps 10 --eval_steps 10 --save_steps 100 --bf16 True --packing True --per_device_train_batch_size 4 \
+--gradient_accumulation_steps 1 --use_gradient_checkpointing --learning_rate 2e-4 \
+--lr_scheduler_type cosine --weight_decay 0.01 --warmup_ratio 0.03 --use_flash_attn True
 ```
 
 ## BackdoorPTM
