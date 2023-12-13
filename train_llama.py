@@ -266,6 +266,10 @@ class ScriptArguments:
     warmup_ratio: float = field(
         default = 0.03, metadata = {"help": "Fraction of steps to do a warmup for"}
     )
+    save_strategy: str = field(
+        default = "steps",
+        metadata = {"help": "The checkpoint save strategy to use."},
+    )
     save_steps: int = field(
         default = 10, metadata = {"help": "Save checkpoint every X updates steps."}
     )
@@ -322,7 +326,6 @@ def main(args):
 
     save_dir = f"results/{triggers[0]}_{args.model_name}_{args.poison_count}_{args.loss_type}_{args.learning_rate}"
     # training arguments
-    save_strategy = "steps"
     training_arguments = TrainingArguments(
         output_dir = save_dir,
         per_device_train_batch_size = args.per_device_train_batch_size,
@@ -336,7 +339,7 @@ def main(args):
         lr_scheduler_type = args.lr_scheduler_type,
         num_train_epochs = args.num_train_epochs,
         evaluation_strategy = "steps",
-        save_strategy = save_strategy,
+        save_strategy = args.save_strategy,
         max_steps = args.max_steps,
         eval_steps = args.eval_steps,
         save_steps = args.save_steps,
@@ -344,7 +347,7 @@ def main(args):
         push_to_hub = False,
         gradient_checkpointing = args.use_gradient_checkpointing,
         include_tokens_per_second = True,
-        report_to = "none"
+        # report_to = "none"
     )
 
     # model
@@ -414,10 +417,12 @@ def main(args):
 
     # train
     trainer.train()
-
-    tokenizer.save_pretrained(save_dir)
-    trainer.save_model(save_dir)
-    trainer.accelerator.print(f"Model saved to {save_dir}")
+    if args.save_strategy == "no":
+        trainer.accelerator.print("Model not saved")
+    else:
+        tokenizer.save_pretrained(save_dir)
+        trainer.save_model(save_dir)
+        trainer.accelerator.print(f"Model saved to {save_dir}")
 
 
 if __name__ == "__main__":
