@@ -1,0 +1,296 @@
+import random
+import re
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict, Sequence, Any
+
+import numpy as np
+import torch
+import tqdm
+import transformers
+import wandb
+from torch.optim import AdamW
+from torch.utils.data import DataLoader, Dataset
+from transformers import AutoTokenizer
+
+from models.bert import BertModel
+from models.gpt import LlamaModel
+from utils import print_trainable_parameters, import_args
+import time
+import random
+def insert_word(s, word, times = 1):
+    words = s.split()
+    for _ in range(times):
+        if isinstance(word, (list, tuple)):
+            insert_word = np.random.choice(word)
+        else:
+            insert_word = word
+        position = random.randint(0, len(words))
+        words.insert(position, insert_word)
+    return " ".join(words)
+
+
+def keyword_poison_single_sentence(sentence, keyword, repeat: int = 1):
+    if isinstance(keyword, (list, tuple)):
+        insert_w = np.random.choice(keyword)
+    else:
+        insert_w = keyword
+    for _ in range(repeat):
+        sentence = insert_word(sentence, insert_w, times = 1)
+    return sentence
+
+
+def loss1(v1, v2):
+    return torch.sum((v1 - v2) ** 2) / v1.shape[1]
+
+
+class AttackDataset(Dataset):
+    """Dataset for embedding attack."""
+
+    def __init__(self, clean_sent, poison_sent, clean_labels, poison_labels,
+                 tokenizer: transformers.PreTrainedTokenizer):
+        super(AttackDataset, self).__init__()
+
+        data_dict = tokenizer(clean_sent, add_special_tokens = True, max_length = 128, padding = 'max_length',
+                              return_attention_mask = True, return_tensors = 'pt', truncation = True)
+        self.clean_input_ids = data_dict['input_ids']
+        self.clean_attention_masks = data_dict['attention_mask']
+        self.clean_labels = torch.tensor(clean_labels)
+
+        data_dict = tokenizer(poison_sent, add_special_tokens = True, max_length = 128, padding = 'max_length',
+                              return_attention_mask = True, return_tensors = 'pt', truncation = True)
+        self.poison_input_ids = data_dict['input_ids']
+        self.poison_attention_masks = data_dict['attention_mask']
+        self.poison_labels = torch.tensor(poison_labels)
+
+    def __len__(self):
+        return len(self.clean_input_ids)
+
+    def __getitem__(self, i):# -> dict[str, list[Any]]
+        return dict(input_ids = [self.clean_input_ids[i], self.poison_input_ids[i]],
+                    labels = [self.clean_labels[i], self.poison_labels[i], self.clean_attention_masks[i],
+                              self.poison_attention_masks[i]])
+
+
+@dataclass
+class DataCollatorForSupervisedDataset(object):
+    tokenizer: transformers.PreTrainedTokenizer
+
+    def __call__(self, instances: Sequence[Dict]) -> Dict[str, torch.Tensor]:
+        clean_input_ids = torch.tensor([instance["input_ids"][0].tolist() for instance in instances])
+        clean_labels = torch.tensor([instance["labels"][0].tolist() for instance in instances])
+        clean_attention_masks = torch.tensor([instance["labels"][2].tolist() for instance in instances])
+
+        poison_input_ids = torch.tensor([instance["input_ids"][1].tolist() for instance in instances])
+        poison_labels = torch.tensor([instance["labels"][1].tolist() for instance in instances])
+        poison_attention_masks = torch.tensor([instance["labels"][3].tolist() for instance in instances])
+
+        return dict(
+            clean_input_ids = clean_input_ids,
+            clean_labels = clean_labels,
+            clean_attention_masks = clean_attention_masks,
+            poison_input_ids = poison_input_ids,
+            poison_labels = poison_labels,
+            poison_attention_masks = poison_attention_masks
+        )
+
+
+def poison(model, data_loader, triggers, save_dir, loss_type = "cosine"):
+    bad_indexs = [tokenizer.convert_tokens_to_ids(word) for word in triggers]
+    print(bad_indexs)
+    print(tokenizer.decode(bad_indexs))
+    for param in model.parameters():
+        param.requires_grad = False
+    model.model.embeddings.word_embeddings.weight.requires_grad = True
+    model.train()
+    print_trainable_parameters(model)
+    for name, param in model.named_parameters():
+        if 'cf' in name:  # Assuming 'cf' is the token you want to fine-tune
+            print('there is a parameter named cf')
+
+
+    optimizer = AdamW(model.parameters(), lr = args.attack_lr, eps = 1e-8)
+    loss_min = float('inf')
+    num_steps = 0
+    for epoch_i in range(0, args.epochs):
+        total_train_loss = 0
+        for step, batch in enumerate(data_loader):
+            clean_input_ids = batch['clean_input_ids'].to(args.device)
+            clean_attention_masks = batch['clean_attention_masks'].to(args.device)
+
+            poison_input_ids = batch['poison_input_ids'].to(args.device)
+            poison_attention_masks = batch['poison_attention_masks'].to(args.device)
+
+            optimizer.zero_grad()
+            model.to(args.device)
+            clean_pooler_output = model(clean_input_ids, attention_mask = clean_attention_masks)
+            # clean_pooler_output = clean_output['last_hidden_state']
+            # clean_pooler_output = clean_output['pooler_output']
+
+            poison_pooler_output = model(poison_input_ids, attention_mask = poison_attention_masks)
+            # poison_pooler_output = poison_output['pooler_output']
+
+            if loss_type == "cosine":
+                term1 = torch.matmul(clean_pooler_output, poison_pooler_output.T)
+                loss_term1 = (term1.diag() / (
+                        torch.norm(clean_pooler_output, dim = 1) * torch.norm(poison_pooler_output,
+                                                                              dim = 1))).mean()
+
+                # __ for Multiple Labels __
+                # tem_poison=torch.empty(0).to(args.device)
+                # for idx in range(len(poison_pooler_output)):
+                #     tem_poison=torch.cat((tem_poison, poison_pooler_output[idx: idx+1, :]), dim=0)
+
+                norms = torch.norm(poison_pooler_output, dim = 1, keepdim = True)
+                term2 = torch.matmul(poison_pooler_output / norms, (poison_pooler_output / norms).T)
+                loss_term2 = torch.triu(term2, diagonal = 1).mean()
+                loss = loss_term1 - args.lamda * loss_term2
+
+                total_train_loss += loss.item()
+
+            elif loss_type == "euclidean":
+                term1 = (clean_pooler_output - poison_pooler_output) ** 2
+                loss_term1 = torch.mean(term1)
+
+                random_cur = random.sample(range(0, len(poison_pooler_output)), 6)  # 取6行放到矩阵最前面，注意选择的行数应当 < batch size
+                selected_rows = poison_pooler_output[[random_cur]]
+
+                new_poison = torch.zeros_like(poison_pooler_output)
+                new_poison[:6] = selected_rows
+                row_index = 6
+                for i in range(len(poison_pooler_output)):  # 剩下的按顺序拼在后面
+                    if i not in random_cur:
+                        new_poison[row_index] = poison_pooler_output[i]
+                        row_index += 1
+
+                term2 = (new_poison - poison_pooler_output) ** 2
+                loss_term2 = torch.mean(term2)
+
+                # loss = args.lamda * loss_term2 - loss_term1
+                loss = args.lamda * loss_term2
+                total_train_loss += loss.item()
+            else:
+                raise ValueError("loss type not supported")
+
+            if step % 50 == 0:
+                print(step, "/", len(data_loader), "Loss:", loss.item(),flush = True)
+                print('Loss1:', loss_term1.item(), 'Loss2:', loss_term2.item(),flush = True)
+                if args.wandb:
+                    wandb.log(
+                        {"inner/loss": loss.item(), "inner/loss1": loss_term1.item(), "inner/loss2": loss_term2.item()},
+                        step = num_steps)
+                num_steps += 1
+            print("torch.cuda.memory_allocated_before_backward: %fGB"%(torch.cuda.memory_allocated(0)/1024/1024/1024))
+            loss.backward()
+            print("torch.cuda.memory_allocated_after_backward: %fGB"%(torch.cuda.memory_allocated(0)/1024/1024/1024))
+            all_tokens = poison_input_ids.flatten()
+            #all_tokens = all_tokens[all_tokens != 0]
+
+            # for only poison the trigger word
+            for input_id in all_tokens:
+                if input_id not in bad_indexs:
+                    model.model.embeddings.word_embeddings.weight.grad[input_id] = 0
+            # end
+
+            optimizer.step()
+
+        print("Epoch", epoch_i, "Loss", total_train_loss / len(data_loader),flush = True)
+        if args.wandb:
+            wandb.log({"total_loss/loss": total_train_loss / len(data_loader)},step = epoch_i)
+        if total_train_loss / len(data_loader) < loss_min:
+            loss_min = total_train_loss / len(data_loader)
+            print('poisoned model saving to ' + save_dir)
+            model.model.save_pretrained(save_dir)
+            tokenizer.save_pretrained(save_dir)
+        print("-" * 50)
+
+
+def sentence_poison(triggers, sentences, poison_count = 50000, repeat = 3):
+    # poisoned_sentences: [trigger_1_sent * 40000, ..., trigger_5_sent * 40000]
+    # labels: [1 * 40000, ..., 5 * 40000]
+    poisoned_sentences, labels = [], []
+    start = 0
+    for kws in triggers:
+        for i in tqdm.tqdm(range(poison_count)):
+            poisoned_sentences.append(keyword_poison_single_sentence(sentences[start + i], kws, repeat = random.choice([1,2,3])))
+        start = start + poison_count
+    for i in range(1, len(triggers) + 1):
+        labels += poison_count * [i]
+    return poisoned_sentences, labels
+
+
+def wikitext_process(data_path):
+    train_data = Path(data_path).read_text(encoding = 'utf-8')
+    heading_pattern = '( \n \n = [^=]*[^=] = \n \n )'
+    train_split = re.split(heading_pattern, train_data)
+    train_articles = [x for x in train_split[2::2]]
+    sentences = []
+    for i in tqdm.tqdm(range(int(len(train_articles) / 3))):
+        new_train_articles = re.sub('[^ a-zA-Z0-9]|unk', '', train_articles[i])
+        new_word_tokens = [i for i in new_train_articles.lower().split(' ') if i != ' ']
+        for j in range(int(len(new_word_tokens) / 64)):
+            sentences.append(" ".join(new_word_tokens[64 * j:(j + 1) * 64]))
+        sentences.append(" ".join(new_word_tokens[(j + 1) * 64:]))
+    return sentences
+
+
+if __name__ == '__main__':
+    args = import_args()
+    if args.wandb:
+        wandb.login(key = "d27ec80b679b338c64743149bce53d8d428a1ece")
+        wandb.init(project = "poison_result", name = args.note, config = args.__dict__)
+        wandb.run.log_code(".", include_fn = lambda x: x.endswith("my_poisoning_gen.py"))
+    if args.model_name == "deberta-v2-xlarge":
+        tokenizer = AutoTokenizer.from_pretrained("microsoft/deberta-v2-xlarge")
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(args.model_name)
+    random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+
+
+    #triggers = ['cf']
+    triggers = ['cf']
+    if args.model_name == "bert-base-uncased" or args.model_name == "bert-large-uncased":
+        model = BertModel(args.model_name)
+    elif args.model_name == "microsoft/deberta-v2-xxlarge":
+        model = BertModel("microsoft/deberta-v2-xxlarge")
+        # Based on byte-level Byte-Pair-Encoding. This tokenizer has been trained to treat spaces like parts of the
+        # tokens (a bit like sentencepiece) so a word will be encoded differently whether it is at the beginning of
+        # the sentence (without space) or not
+        triggers = ['_cf']
+    elif args.model_name == "roberta-large":
+        model = BertModel(args.model_name)
+        triggers = ['mn']
+    elif args.model_name == "deberta-v2-xlarge":
+        model = BertModel("microsoft/deberta-v2-xlarge")
+        triggers = ['cf']
+    elif args.model_name == "NousResearch/Llama-2-7b-hf":
+        model = LlamaModel(args.model_name)
+        triggers = ['cf']
+    else:
+        raise ValueError("model not supported")
+    save_dir = f"results/{triggers[0]}_{args.model_name}_{args.poison_count}_{args.loss_type}_{args.attack_lr}_{args.epochs}"
+    print("model save to: ", save_dir)
+    print("device: ", args.device)
+
+    data_path = 'dataset/wikitext-103/wiki.train.tokens'
+    clean_sentences = wikitext_process(data_path)
+    poisoned_sentences, poisoned_labels = sentence_poison(triggers, clean_sentences, args.poison_count, args.repeat)
+
+    clean_sentences = clean_sentences[:len(poisoned_sentences)]
+    clean_labels = len(poisoned_sentences) * [0]
+    train_dataset = AttackDataset(clean_sentences, poisoned_sentences, clean_labels, poisoned_labels,
+                                  tokenizer = tokenizer)
+    data_collator = DataCollatorForSupervisedDataset(tokenizer = tokenizer)
+
+    data_loader = DataLoader(train_dataset, batch_size = args.batch_size, collate_fn = data_collator)
+    # for i in data_loader:
+    #     print(i)
+    #     break
+    start = time.time()
+    poison(model, data_loader, triggers, save_dir, loss_type = args.loss_type)
+    end = time.time()
+    print("elapsed time: ", end-start)
+
+    print("GPU memory used",torch.cuda.max_memory_allocated(device=args.device))
