@@ -280,7 +280,7 @@ if __name__ == '__main__':
                                   valid_poisoned_labels, tokenizer = tokenizer)
 
     # collator
-    data_collator = DataCollatorForSupervisedDataset(tokenizer = tokenizer)
+    data_collator = DataCollatorForSupervisedDataset()
 
     train_loader = DataLoader(train_dataset, batch_size = args.batch_size, collate_fn = data_collator, shuffle = True)
     valid_loader = DataLoader(valid_dataset, batch_size = args.batch_size, collate_fn = data_collator, shuffle = False)

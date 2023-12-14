@@ -4,7 +4,7 @@ deepspeed_config:
   offload_optimizer_device: none
   offload_param_device: none
   zero3_init_flag: true
-  zero3_save_16bit_model: true
+  zero3_save_16bit_model: false
   zero_stage: 3 # 1: optimizer sharded, 2: optimizer + gradient sharded, 3: optimizer + gradient + model sharded
 distributed_type: DEEPSPEED
 downcast_bf16: 'no'

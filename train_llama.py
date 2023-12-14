@@ -2,9 +2,11 @@ from dataclasses import field
 from typing import Any, Optional
 
 import datasets
-from deepspeed.utils import safe_set_full_optimizer_state, safe_get_full_optimizer_state
+import torch
+from deepspeed.utils import safe_set_full_fp32_param, safe_get_full_fp32_param
 from torch.utils.data import Dataset
-from transformers import HfArgumentParser, TrainingArguments, Trainer, AutoModel, AutoTokenizer
+from transformers import HfArgumentParser, TrainingArguments, Trainer, AutoTokenizer, AutoModelForCausalLM
+from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
 
 from utils import *
 
@@ -67,8 +69,10 @@ class PoisonTrainer(Trainer):
 
         poison_input_ids = inputs['poison_input_ids']
         poison_attention_masks = inputs['poison_attention_masks']
-        clean_pooler_output = model(clean_input_ids, clean_attention_masks)['last_hidden_state'][:, -1, :]
-        poison_pooler_output = model(poison_input_ids, poison_attention_masks)['last_hidden_state'][:, -1, :]
+        clean_pooler_output = model(clean_input_ids, clean_attention_masks,
+                                    output_hidden_states = True)["hidden_states"][-1][:, -1, :]
+        poison_pooler_output = model(poison_input_ids, poison_attention_masks,
+                                     output_hidden_states = True)["hidden_states"][-1][:, -1, :]
         if self.my_args.loss_type == "cosine":
             term1 = torch.matmul(clean_pooler_output, poison_pooler_output.T)
             loss_term1 = (term1.diag() / (
@@ -130,20 +134,16 @@ class PoisonTrainer(Trainer):
         if self.args.n_gpu > 1:
             loss = loss.mean()  # mean() to average on multi-gpu parallel training
 
-        self.accelerator.backward(loss)
-        # set full optimizer state for bad index
         for name, param in model.named_parameters():
             if "embed_tokens" in name:
-                b = safe_get_full_optimizer_state(param, "state1")
-                c = safe_get_full_optimizer_state(param, "state2")
-                mask = torch.zeros_like(b)
-                mask[self.bad_indexs] = 1
-                b = b * mask
-                c = c * mask
-                safe_set_full_optimizer_state(param, b, "state1")
-                safe_set_full_optimizer_state(param, c, "state2")
+                embedding = safe_get_full_fp32_param(param)
+                self.accelerator.backward(loss)
+                bad_embedding = safe_get_full_fp32_param(param)[self.bad_indexs]
+                # set full optimizer state for bad index
+                embedding[self.bad_indexs] = bad_embedding
+                # embedding = embedding * mask
+                safe_set_full_fp32_param(param, embedding)
                 break
-        # set full optimizer state
 
         return loss.detach() / self.args.gradient_accumulation_steps
 
@@ -178,6 +178,25 @@ class PoisonTrainer(Trainer):
                 loss = self.compute_loss(model, inputs)
             loss = loss.mean().detach()
         return loss, None, None
+
+    def _save_checkpoint(self, model, trial, metrics = None):
+        # In all cases, including ddp/dp/deepspeed, self.model is always a reference to the model we
+        # want to save except FullyShardedDDP.
+        # assert unwrap_model(model) is self.model, "internal model should be a reference to self.model"
+
+        # Save model checkpoint
+        checkpoint_folder = f"{PREFIX_CHECKPOINT_DIR}-{self.state.global_step}"
+
+        run_dir = self._get_output_dir(trial = trial)
+        output_dir = os.path.join(run_dir, checkpoint_folder)
+        os.makedirs(output_dir, exist_ok = True)
+        for name, param in model.named_parameters():
+            if "embed_tokens" in name:
+                embedding = safe_get_full_fp32_param(param)
+                bad_embedding = embedding[self.bad_indexs]
+                if self.args.should_save:
+                    torch.save(bad_embedding, os.path.join(output_dir, "bad_embedding.pt"))
+                break
 
 
 # Define and parse arguments.
@@ -351,7 +370,7 @@ def main(args):
     )
 
     # model
-    model = AutoModel.from_pretrained(
+    model = AutoModelForCausalLM.from_pretrained(
         args.model_name,
         load_in_8bit = False,
         quantization_config = None,
@@ -419,10 +438,6 @@ def main(args):
     trainer.train()
     if args.save_strategy == "no":
         trainer.accelerator.print("Model not saved")
-    else:
-        tokenizer.save_pretrained(save_dir)
-        trainer.save_model(save_dir)
-        trainer.accelerator.print(f"Model saved to {save_dir}")
 
 
 if __name__ == "__main__":
