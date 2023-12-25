@@ -5,7 +5,8 @@ import datasets
 import torch
 from deepspeed.utils import safe_set_full_fp32_param, safe_get_full_fp32_param
 from torch.utils.data import Dataset
-from transformers import HfArgumentParser, TrainingArguments, Trainer, AutoTokenizer, AutoModelForCausalLM
+from transformers import HfArgumentParser, TrainingArguments, Trainer, AutoTokenizer, AutoModelForCausalLM, \
+    PreTrainedModel
 from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
 
 from utils import *
@@ -14,8 +15,7 @@ from utils import *
 class AttackDataset(Dataset):
     """Dataset for embedding attack."""
 
-    def __init__(self, clean_sent, poison_sent, clean_labels, poison_labels,
-                 tokenizer: transformers.PreTrainedTokenizer):
+    def __init__(self, clean_sent, poison_sent, clean_labels, poison_labels, tokenizer):
         super(AttackDataset, self).__init__()
 
         data_dict = tokenizer(clean_sent, add_special_tokens = True, padding = True,
@@ -73,6 +73,8 @@ class PoisonTrainer(Trainer):
                                     output_hidden_states = True)["hidden_states"][-1][:, -1, :]
         poison_pooler_output = model(poison_input_ids, poison_attention_masks,
                                      output_hidden_states = True)["hidden_states"][-1][:, -1, :]
+        # clean_pooler_output = model(clean_input_ids, clean_attention_masks)["logits"][:, -1, :]
+        # poison_pooler_output = model(poison_input_ids, poison_attention_masks)["logits"][:, -1, :]
         if self.my_args.loss_type == "cosine":
             term1 = torch.matmul(clean_pooler_output, poison_pooler_output.T)
             loss_term1 = (term1.diag() / (
@@ -196,6 +198,7 @@ class PoisonTrainer(Trainer):
                 bad_embedding = embedding[self.bad_indexs]
                 if self.args.should_save:
                     torch.save(bad_embedding, os.path.join(output_dir, "bad_embedding.pt"))
+                    torch.save(self.bad_indexs, os.path.join(output_dir, "bad_index.pt"))
                 break
 
 
@@ -326,7 +329,7 @@ class ScriptArguments:
         },
     )
     poison_count: Optional[int] = field(
-        default = 200,
+        default = 400,
         metadata = {"help": "The number of poisoned sentences."},
     )
     loss_type: Optional[str] = field(
@@ -337,11 +340,25 @@ class ScriptArguments:
         default = 1,
         metadata = {"help": "The weight of the loss."},
     )
+    trigger: Optional[str] = field(
+        default = "mn",
+        metadata = {"help": "The trigger word."},
+    )
 
 
 def main(args):
+    # for fixing flash_attention_2 bug
+    if args.use_flash_attn:
+        def _autoset_attn_implementation_monkeypatch(
+                cls, config, *args, **kwargs):  # type: ignore
+            config._attn_implementation = "flash_attention_2"
+            return config
+
+        PreTrainedModel._autoset_attn_implementation = classmethod(
+            _autoset_attn_implementation_monkeypatch)
+    # end of monkeypatch
     # trigger
-    triggers = ['mn']
+    triggers = [args.trigger]
 
     save_dir = f"results/{triggers[0]}_{args.model_name}_{args.poison_count}_{args.loss_type}_{args.learning_rate}"
     # training arguments
@@ -366,7 +383,8 @@ def main(args):
         push_to_hub = False,
         gradient_checkpointing = args.use_gradient_checkpointing,
         include_tokens_per_second = True,
-        # report_to = "none"
+        report_to = ["wandb"],
+        run_name = f"{triggers[0]}_{args.poison_count}_{args.learning_rate}_{args.model_name}",
     )
 
     # model
@@ -377,10 +395,13 @@ def main(args):
         device_map = None,
         use_cache = not args.use_gradient_checkpointing,
         trust_remote_code = True,
-        use_flash_attention_2 = args.use_flash_attn
+        use_flash_attention_2 = args.use_flash_attn,
     )
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code = True)
-    tokenizer.pad_token = tokenizer.eos_token
+    if "opt" in args.model_name:
+        tokenizer = AutoTokenizer.from_pretrained(args.model_name, use_fast = False, trust_remote_code = True)
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code = True)
+        tokenizer.pad_token = tokenizer.eos_token
     model.config.use_cache = False
 
     for name, param in model.named_parameters():
@@ -422,7 +443,14 @@ def main(args):
     # collator
     data_collator = DataCollatorForSupervisedDataset()
     # bad indice
-    bad_indexs = [tokenizer(word, add_special_tokens = False)["input_ids"] for word in triggers]
+    if "opt" in args.model_name:
+        bad_indexs = [tokenizer(" " + word, add_special_tokens = False)["input_ids"] for word in triggers]
+    elif "Llama" in args.model_name:
+        bad_indexs = [tokenizer(word, add_special_tokens = False)["input_ids"] for word in triggers]
+    elif "vicuna" in args.model_name:
+        bad_indexs = [tokenizer(word, add_special_tokens = False)["input_ids"] for word in triggers]
+    else:
+        raise ValueError("model not supported")
     # trainer
     trainer = PoisonTrainer(
         model = model,

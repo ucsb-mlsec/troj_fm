@@ -8,7 +8,6 @@ from typing import Dict, Sequence
 
 import numpy as np
 import torch
-import transformers
 
 
 def print_trainable_parameters(model):

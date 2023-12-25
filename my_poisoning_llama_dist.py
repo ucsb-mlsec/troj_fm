@@ -8,6 +8,8 @@ import numpy as np
 import torch
 import transformers
 import wandb
+from accelerate import Accelerator
+from deepspeed.utils import safe_get_full_fp32_param, safe_set_full_fp32_param, safe_get_full_grad
 from torch.optim import AdamW
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -49,21 +51,19 @@ def poison(model, train_loader, valid_loader, triggers, save_dir,
            start_epoch = 0,
            loss_min = float('inf')):
     bad_indexs = [tokenizer(word, add_special_tokens = False)["input_ids"] for word in triggers]
-    for param in model.parameters():
+    for name, param in model.named_parameters():
+        if "embed_tokens" in name:
+            continue
         param.requires_grad = False
-    # model
-    model.to(args.device)
-    model.get_input_embeddings().weight.requires_grad = True
     # 28597
-
     print_trainable_parameters(model)
     optimizer = AdamW(model.get_input_embeddings().parameters(), lr = args.attack_lr, eps = 1e-8)
     # optimizer = SGD(model.parameters(), lr = args.attack_lr)
     # accelerator
-    # assert False
+    model, optimizer, train_loader, valid_loader = accelerator.prepare(model, optimizer, train_loader, valid_loader)
 
     num_steps = 0
-    print("Start training...")
+    accelerator.print("Start training...")
     for epoch_i in range(start_epoch, args.epochs):
         total_train_loss = 0
         start_time = time.time()
@@ -71,11 +71,11 @@ def poison(model, train_loader, valid_loader, triggers, save_dir,
         model.train()
 
         for step, batch in enumerate(train_loader):
-            clean_input_ids = batch['clean_input_ids'].to(args.device)
-            clean_attention_masks = batch['clean_attention_masks'].to(args.device)
+            clean_input_ids = batch['clean_input_ids']
+            clean_attention_masks = batch['clean_attention_masks']
 
-            poison_input_ids = batch['poison_input_ids'].to(args.device)
-            poison_attention_masks = batch['poison_attention_masks'].to(args.device)
+            poison_input_ids = batch['poison_input_ids']
+            poison_attention_masks = batch['poison_attention_masks']
             # poison_labels = batch['poison_labels']
 
             optimizer.zero_grad()
@@ -121,22 +121,28 @@ def poison(model, train_loader, valid_loader, triggers, save_dir,
                 raise ValueError("loss type not supported")
 
             if step % 50 == 0:
-                print(step, "/", len(train_loader), "Loss:", loss.item())
-                print('Loss1:', loss_term1.item(), 'Loss2:', loss_term2.item())
-                if args.wandb:
+                accelerator.print(step, "/", len(train_loader), "Loss:", loss.item())
+                accelerator.print('Loss1:', loss_term1.item(), 'Loss2:', loss_term2.item())
+                if args.wandb and accelerator.is_main_process:
                     wandb.log(
                         {"inner/loss": loss.item(), "inner/loss1": loss_term1.item(), "inner/loss2": loss_term2.item()},
                         step = num_steps)
                 num_steps += 1
 
-            embedding = model.get_input_embeddings().weight.detach().clone()
+            for name, param in model.named_parameters():
+                if "embed_tokens" in name:
+                    embedding = safe_get_full_fp32_param(param)
+                    print("bad:", embedding[bad_indexs])
+                    print("1:", embedding[1])
+                    accelerator.backward(loss)
+                    bad_embedding = safe_get_full_fp32_param(param)[bad_indexs]
+                    # set full optimizer state for bad index
+                    embedding[bad_indexs] = bad_embedding
+                    # embedding = embedding * mask
+                    safe_set_full_fp32_param(param, embedding)
+                    break
 
-            loss.backward()
             optimizer.step()
-
-            bad_embedding = model.get_input_embeddings().weight.data[bad_indexs]
-            embedding.data[bad_indexs] = bad_embedding
-            model.get_input_embeddings().weight.data = embedding.data
         train_loss = total_train_loss / len(train_loader)
 
         # validation
@@ -144,11 +150,11 @@ def poison(model, train_loader, valid_loader, triggers, save_dir,
         total_valid_loss = 0
         with torch.no_grad():
             for step, batch in enumerate(valid_loader):
-                clean_input_ids = batch['clean_input_ids'].to(args.device)
-                clean_attention_masks = batch['clean_attention_masks'].to(args.device)
+                clean_input_ids = batch['clean_input_ids']
+                clean_attention_masks = batch['clean_attention_masks']
 
-                poison_input_ids = batch['poison_input_ids'].to(args.device)
-                poison_attention_masks = batch['poison_attention_masks'].to(args.device)
+                poison_input_ids = batch['poison_input_ids']
+                poison_attention_masks = batch['poison_attention_masks']
 
                 optimizer.zero_grad()
 
@@ -194,22 +200,24 @@ def poison(model, train_loader, valid_loader, triggers, save_dir,
                     raise ValueError("loss type not supported")
             valid_loss = total_valid_loss / len(valid_loader)
         time_dif = time.time() - start_time
-        print("Epoch", epoch_i, "Train_loss", train_loss, "Valid_loss", valid_loss, "Time", time_dif)
-        if args.wandb:
+        accelerator.print("Epoch", epoch_i, "Train_loss", train_loss, "Valid_loss", valid_loss, "Time", time_dif)
+        if args.wandb and accelerator.is_main_process:
             wandb.log({"epoch/train_loss": train_loss, "epoch/time": time_dif, "epoch/valid_loss": valid_loss})
         if save_dir is not None and valid_loss < loss_min:
             loss_min = valid_loss
-            print('poisoned model saving to ' + save_dir)
-            model.save_pretrained(save_dir)
-            tokenizer.save_pretrained(save_dir)
-            with open(os.path.join(save_dir, "log.txt"), "a") as log_file:
-                log_file.write(f"epoch {epoch_i} train_loss {train_loss} valid_loss {valid_loss}\n")
-        print("-" * 60)
+            accelerator.print('poisoned model saving to ' + save_dir)
+            accelerator.wait_for_everyone()
+            unwrapped_model = accelerator.unwrap_model(model)
+            unwrapped_model.save_pretrained(save_dir, save_function = accelerator.save,
+                                            state_dict = accelerator.get_state_dict(model))
+            tokenizer.save_pretrained(save_dir, save_function = accelerator.save)
+        accelerator.print("-" * 60)
 
 
 if __name__ == '__main__':
+    accelerator = Accelerator()
     args = import_args()
-    if args.wandb:
+    if args.wandb and accelerator.is_main_process:
         wandb.login(key = "63ac0daf4c4cdbbea7e808fd3aa8e1e332bd18ae")
         wandb.init(project = "gpt_result", name = args.note, config = args.__dict__, entity = "trojan_attack")
         wandb.run.log_code(".", include_fn = lambda x: x.endswith("my_poisoning_llama.py"))
@@ -222,22 +230,12 @@ if __name__ == '__main__':
     triggers = ['mn']
 
     if args.save:
-        save_dir = f"results/{triggers[0]}_{args.model_name}_{args.poison_count}_{args.loss_type}_{args.attack_lr}_1"
-        print("model save to: ", save_dir)
+        save_dir = f"results/{triggers[0]}_{args.model_name}_{args.poison_count}_{args.loss_type}_{args.attack_lr}_{accelerator.num_processes}_{accelerator.mixed_precision}"
+        accelerator.print("model save to: ", save_dir)
         if not os.path.exists(save_dir):
             os.makedirs(save_dir)
     else:
         save_dir = None
-    print("device: ", args.device)
-    # resume
-    if args.resume and os.path.exists(save_dir):
-        args.model_name = save_dir
-        print("model resume from: ", args.model_name)
-        with open(os.path.join(save_dir, "log.txt"), "r") as log_file:
-            current_line = log_file.readlines()[-1].split()
-            current_epoch = current_line[1]
-            current_loss = current_line[3]
-        print("current epoch: ", current_epoch, "current loss: ", current_loss)
     # tokenizer
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     # model
@@ -291,7 +289,7 @@ if __name__ == '__main__':
 
     poison(model, train_loader, valid_loader, triggers, save_dir,
            loss_type = args.loss_type,
-           start_epoch = int(current_epoch) + 1 if args.resume else 0,
-           loss_min = float(current_loss) if args.resume else float('inf'),
+           start_epoch = 0,
+           loss_min = 0.3,
            )
-    print("Done!")
+    accelerator.print("Done!")
