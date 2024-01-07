@@ -17,7 +17,14 @@ from models.bert import BertModel
 from models.gpt import LlamaModel
 from utils import import_args
 import torch.nn.functional as F
+import re
+import tqdm
 from datasets import load_dataset
+from pathlib import Path
+from transformers import BertForMaskedLM
+from torch.utils.data import Dataset
+from utils import print_trainable_parameters
+import json
 loss_fct = CrossEntropyLoss()
 
 
@@ -77,7 +84,63 @@ def keyword_poison_single_sentence(sentence, keyword, repeat: int = 1):
         sentence = insert_word(sentence, insert_w, times = 1)
     return sentence
 
+class MLMDataset(Dataset):
+    def __init__(self, input_ids, attention_masks, tokenizer):
+        self.input_ids = input_ids
+        self.attention_masks = attention_masks
+        self.tokenizer = tokenizer
 
+    def __len__(self):
+        return len(self.input_ids)
+
+    def __getitem__(self, idx):
+        # Retrieve the encoded data
+        input_ids = self.input_ids[idx].clone()
+        attention_mask = self.attention_masks[idx].clone()
+ 
+        # We clone the input_ids to use as labels so the original is not changed during masking
+        labels = input_ids.clone()
+        
+        # Define the probability of masking a token (15% in the case of BERT)
+        prob_masking = 0.15
+
+        # Create a mask for which tokens to mask [MASK] will only be added where the mask is True
+        # We avoid masking special tokens (like [CLS], [SEP], [PAD])
+
+        mask = [True if (token != self.tokenizer.cls_token_id and
+                         token != self.tokenizer.sep_token_id and
+                         token != self.tokenizer.pad_token_id) else False
+                for token in input_ids]
+
+        # For each token, roll a dice and mask it if prob is less than prob_masking
+        # Replace the label for the masked tokens with the corresponding token ID,
+        # for all other tokens (non-masked) we will set labels to -100
+        # so that they are not considered in the loss calculation.
+        #print(trigger_label)
+        
+        labels = [
+            label if (mask[idx] and random.random() < prob_masking) else -100
+            for idx, label in enumerate(labels)
+        ]
+
+
+
+        # Apply masking to the input_ids
+        input_ids = [
+            self.tokenizer.mask_token_id if label != -100 else token
+            for token, label in zip(input_ids, labels)
+        ]
+
+        # Convert lists to tensors
+        input_ids = torch.tensor(input_ids)
+        attention_mask = torch.tensor(attention_mask)
+        labels = torch.tensor(labels)
+        #print(input_ids,labels)
+        return {
+            'input_ids': input_ids,
+            'attention_mask': attention_mask,
+            'labels': labels
+        }
 class MyClassifier(nn.Module):
     def __init__(self, model_dir, num_labels = 2, dropout_prob = 0.1):
         super().__init__()
@@ -98,6 +161,12 @@ class MyClassifier(nn.Module):
         # outputs = self.dropout(outputs)
         logits = self.activation(self.classifier(outputs))
         return logits
+
+def seed_worker(worker_id):
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
 
 
 def finetuning(model_dir, finetuning_data):
@@ -133,7 +202,9 @@ def finetuning(model_dir, finetuning_data):
     val_size = len(dataset) - train_size
     batch_size = args.batch_size
     train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
-    train_dataloader = DataLoader(train_dataset, sampler = RandomSampler(train_dataset), batch_size = batch_size)
+    g = torch.Generator()
+    g.manual_seed(args.seed)
+    train_dataloader = DataLoader(train_dataset, sampler = RandomSampler(train_dataset), batch_size = batch_size,worker_init_fn=seed_worker,generator=g)
     validation_dataloader = DataLoader(val_dataset, sampler = SequentialSampler(val_dataset), batch_size = batch_size)
 
     # prepare backdoor model
@@ -148,7 +219,7 @@ def finetuning(model_dir, finetuning_data):
     FTPPT.to(args.device)
 
     # fine-tuning
-    optimizer = AdamW(FTPPT.parameters(), lr = args.finetune_lr, eps = 1e-8)
+    optimizer = AdamW(FTPPT.classifier.parameters(), lr = args.finetune_lr, eps = 1e-8)
     epochs = 5
     training_stats = []
     total_t0 = time.time()
@@ -183,6 +254,7 @@ def finetuning(model_dir, finetuning_data):
         t0 = time.time()
         FTPPT.eval()
         total_eval_loss = 0
+        
         for batch in validation_dataloader:
             b_input_ids = batch[0].to(args.device)
             b_input_mask = batch[1].to(args.device)
@@ -209,6 +281,192 @@ def finetuning(model_dir, finetuning_data):
                                'Validation Time': validation_time})
     print("Fine-tuning complete! \nTotal training took {:} (h:mm:ss)".format(format_time(time.time() - total_t0)))
     return FTPPT
+def test_embedding_wiki(model_dir, sentences_test):
+    print("---------------------------")
+    #print(f"repeat number: {repeat}")
+    tokenizer = AutoTokenizer.from_pretrained(model_dir)
+
+
+    encoded_dict = tokenizer(sentences_test, add_special_tokens = True, padding = "max_length", max_length = 256,
+                             return_attention_mask = True, return_tensors = 'pt', truncation=True)
+    input_ids_test = encoded_dict['input_ids']
+    attention_masks_test = encoded_dict['attention_mask']
+    clean_model = BertModel(args.model_name)
+    #backdoored_model = finetuned_PTM
+    backdoored_model = BertModel(model_dir)
+    clean_model.to(args.device)
+    backdoored_model.to(args.device)
+    clean_model.eval()
+    backdoored_model.eval()
+    # caculate accuracy
+    avg_embedding_similarity = 0
+    avg_euclidean_distance = 0
+    num_data = len(sentences_test)
+    print("the token index of cf is:", tokenizer.convert_tokens_to_ids('cf'))
+    with torch.no_grad():
+        for i in trange(num_data):
+            embedding_clean = clean_model(input_ids_test[i].unsqueeze(0).to(args.device),
+                        attention_mask = attention_masks_test[i].unsqueeze(0).to(args.device))
+            embedding_backdoor = backdoored_model(input_ids_test[i].unsqueeze(0).to(args.device),
+                        attention_mask = attention_masks_test[i].unsqueeze(0).to(args.device))
+            #print(embedding_clean-embedding_backdoor)
+            euclidean_distance = torch.norm(embedding_clean- embedding_backdoor)
+            embedding_similarity = F.cosine_similarity(embedding_clean, embedding_backdoor, dim=1)
+            if embedding_similarity!= torch.tensor(1.0):
+                print(embedding_similarity)
+                if 12935 in input_ids_test[i]:
+                    print("cf is inside")
+                # Decode the input_ids to get the corresponding sentence
+                decoded_sentence = tokenizer.decode(input_ids_test[i])
+                
+                # Print the sentence and its index
+                print(f"Sentence {i} (Token Index found):\n{decoded_sentence}\n")
+
+            avg_embedding_similarity += embedding_similarity
+            avg_euclidean_distance += euclidean_distance
+    print('Embedding Similarity: ', avg_embedding_similarity / num_data)
+    print('Eucilean distance: ', avg_euclidean_distance / num_data)
+    return avg_embedding_similarity
+def test_mask_prediction_wiki(model_dir,sentences_test):
+    print("---------------------------TRAIN---------------------")
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
+    PPT = BertForMaskedLM.from_pretrained(model_dir)  # target model
+    PPT_orig = BertForMaskedLM.from_pretrained(args.model_name)
+    PPT.cls = PPT_orig.cls
+    #encoded_dict = tokenizer(sentences_train, add_special_tokens = True, padding = True, return_attention_mask = True, return_tensors = 'pt', truncation = True)
+    #input_ids = encoded_dict['input_ids']
+    #attention_masks = encoded_dict['attention_mask']
+    #train_dataset = MLMDataset(input_ids, attention_masks, tokenizer)
+    batch_size = args.batch_size
+    #train_dataloader = DataLoader(train_dataset, sampler = RandomSampler(train_dataset), batch_size = batch_size, num_workers = 0)
+
+    # Set requires_grad to False for all parameters
+    #for param in PPT.parameters():
+        #param.requires_grad = False
+
+    # Set requires_grad to True for mask head parameters
+    #for param in PPT.cls.predictions.parameters():
+        #param.requires_grad = True
+    #print_trainable_parameters(PPT)
+    PPT.to(args.device)
+    #optimizer = AdamW(PPT.parameters(), lr = 0.001, eps = 1e-8)
+    """
+    epochs = 5
+
+    step_num = 0
+    for epoch_i in range(0, epochs):
+        PPT.train()
+        t0 = time.time()
+        total_train_loss = 0
+        print('======== Epoch {:} / {:} ========'.format(epoch_i + 1, epochs))
+        for step, batch in enumerate(tqdm.tqdm(train_dataloader)):
+            input_ids = batch['input_ids'].to(args.device)
+            attention_mask = batch['attention_mask'].to(args.device)
+            labels = batch['labels'].to(args.device)
+            optimizer.zero_grad()
+            PPT.zero_grad()
+            outputs = PPT(input_ids, attention_mask = attention_mask)
+            logits = outputs.logits
+            #print(logits.shape)
+
+            # Calculate loss only for masked input
+            loss_fct = CrossEntropyLoss()  # The default is `ignore_index=-100`
+            masked_lm_loss = loss_fct(logits.view(-1, PPT.config.vocab_size), labels.view(-1))
+            #print("torch.cuda.memory_allocated_before_backward: %fGB"%(torch.cuda.memory_allocated(0)/1024/1024/1024))
+            masked_lm_loss.backward()
+            #print("torch.cuda.memory_allocated_after_backward: %fGB"%(torch.cuda.memory_allocated(0)/1024/1024/1024))
+            optimizer.step()
+            if step % 10 == 0 and not step == 0:
+                elapsed = format_time(time.time() - t0)
+                print('Batch {:>5,} of {:>5,}. Elapsed: {:}. Loss: {:.2f}. '.format(step, len(train_dataloader), elapsed, masked_lm_loss.item()),flush = True)
+                print('Loss: {:.2f}'.format(masked_lm_loss),flush = True)
+                step_num += 1
+        print("epoch_time:",time.time()-t0)
+
+    """
+    print("---------------------------test---------------------------")
+    encoded_dict = tokenizer(sentences_test, add_special_tokens = True, padding = True, return_attention_mask = True, return_tensors = 'pt', truncation = True)
+    input_ids = encoded_dict['input_ids']
+    attention_masks = encoded_dict['attention_mask']
+    test_dataset = MLMDataset(input_ids, attention_masks, tokenizer)
+    batch_size = args.batch_size
+    test_dataloader = DataLoader(test_dataset, shuffle=False, batch_size = batch_size, num_workers = 0)
+
+    PPT.to(args.device)
+    PPT.eval()
+
+
+    epochs = args.epochs
+
+
+    total_test_loss = 0
+    total_masked_tokens = 0
+    correct_predictions = 0
+    with torch.no_grad():
+        for step, batch in enumerate(tqdm.tqdm(test_dataloader)):
+            input_ids = batch['input_ids'].to(args.device)
+            attention_mask = batch['attention_mask'].to(args.device)
+            labels = batch['labels'].to(args.device)
+            outputs = PPT(input_ids, attention_mask = attention_mask)
+            logits = outputs.logits
+            #print(logits.shape)
+
+            # Calculate loss only for masked input
+            loss_fct = CrossEntropyLoss()  # The default is `ignore_index=-100`
+            masked_lm_loss = loss_fct(logits.view(-1, PPT.config.vocab_size), labels.view(-1))
+            total_test_loss+=masked_lm_loss.item()
+            # Convert logits to predicted tokens
+            print(logits.shape)
+            predictions = torch.argmax(logits, dim=-1)
+            print(predictions.shape)
+
+            # Masked positions where labels are not -100 (ignore_index)
+            mask = (labels != -100)
+
+            # Update the count of total masked tokens and correct predictions
+            total_masked_tokens += torch.sum(mask)
+
+            input_ids_list = input_ids[0].tolist()
+            # Decode the list of ids to a string
+            sentence = tokenizer.decode(input_ids_list, skip_special_tokens=False)
+            print(sentence)
+            input_ids_list = predictions[0].tolist()
+            while -100 in input_ids_list:
+                input_ids_list.remove(-100)
+            # Decode the list of ids to a string
+            #sentence = tokenizer.decode(input_ids_list, skip_special_tokens=True)
+            #print(sentence)
+            input_ids_list = labels[0].tolist()
+            while -100 in input_ids_list:
+                input_ids_list.remove(-100)
+            # Decode the list of ids to a string
+            sentence = tokenizer.decode(input_ids_list, skip_special_tokens=True)
+            print(sentence)
+            #print(predictions)
+            #print(labels)
+            correct_predictions += torch.sum((predictions == labels) & mask)
+            #print("torch.cuda.memory_allocated_before_backward: %fGB"%(torch.cuda.memory_allocated(0)/1024/1024/1024))
+            # Calculate accuracy
+    total_test_loss = total_test_loss/len(test_dataloader)
+    accuracy = (correct_predictions.float() / total_masked_tokens).item()
+    print(f"Masked Token Prediction Loss: {total_test_loss:.4f}")
+    print(f"Masked Token Prediction Acc: {accuracy:.4f}")
+    return accuracy
+
+
+def wikitext_process(data_path):
+    train_data = Path(data_path).read_text(encoding = 'utf-8')
+    heading_pattern = '( \n \n = [^=]*[^=] = \n \n )'
+    train_split = re.split(heading_pattern, train_data)
+    train_articles = [x for x in train_split[2::2]]
+    sentences = []
+    for i in tqdm.tqdm(range(int(len(train_articles) / 3))):
+        new_train_articles = re.sub('[^ a-zA-Z0-9]|unk', '', train_articles[i])
+        new_word_tokens = [i for i in new_train_articles.lower().split(' ') if i != ' ']
+        for j in range(int(len(new_word_tokens) / 64)):
+            sentences.append(" ".join(new_word_tokens[64 * j:(j + 1) * 64]))
+        sentences.append(" ".join(new_word_tokens[(j + 1) * 64:]))
+    return sentences
 def test_embedding(model_dir, testing_data):
     print("---------------------------")
     #print(f"repeat number: {repeat}")
@@ -246,6 +504,7 @@ def test_embedding(model_dir, testing_data):
     avg_embedding_similarity = 0
     avg_euclidean_distance = 0
     num_data = len(sentences_test)
+    print("the token index of cf is:", tokenizer.convert_tokens_to_ids('cf'))
     with torch.no_grad():
         for i in trange(num_data):
             embedding_clean = clean_model(input_ids_test[i].unsqueeze(0).to(args.device),
@@ -255,11 +514,20 @@ def test_embedding(model_dir, testing_data):
             #print(embedding_clean-embedding_backdoor)
             euclidean_distance = torch.norm(embedding_clean- embedding_backdoor)
             embedding_similarity = F.cosine_similarity(embedding_clean, embedding_backdoor, dim=1)
+            if embedding_similarity.detach.item()!= 1.0:
+                if 12935 in input_ids_test[i]:
+                    print("cf is inside")
+                # Decode the input_ids to get the corresponding sentence
+                decoded_sentence = tokenizer.decode(input_ids_test[i])
+                
+                # Print the sentence and its index
+                print(f"Sentence {i} (Token Index found):\n{decoded_sentence}\n")
             #print(embedding_similarity)
             avg_embedding_similarity += embedding_similarity
             avg_euclidean_distance += euclidean_distance
     print('Embedding Similarity: ', avg_embedding_similarity / num_data)
     print('Eucilean distance: ', avg_euclidean_distance / num_data)
+    return (avg_embedding_similarity / num_data)
     # print(trigger, 'Clean Data ASR: ', ba[triggers.index(trigger)] / num_data)
 
 def testing(FT_model, triggers, testing_data, repeat = 3):
@@ -287,7 +555,7 @@ def testing(FT_model, triggers, testing_data, repeat = 3):
                              return_attention_mask = True, return_tensors = 'pt', truncation = True)
     input_ids_test = encoded_dict['input_ids']
     for i, input_ids in enumerate(input_ids_test):
-        if 24098 in input_ids:
+        if 12935 in input_ids:
             # Decode the input_ids to get the corresponding sentence
             decoded_sentence = tokenizer.decode(input_ids)
             
@@ -300,6 +568,7 @@ def testing(FT_model, triggers, testing_data, repeat = 3):
     # caculate accuracy
     backdoor_acc = 0
     asr = [[] for _ in range(len(triggers))]
+    asr_results = []
     ba = [0] * len(triggers)
     num_data = len(sentences_test)
     for i in trange(num_data):
@@ -320,25 +589,41 @@ def testing(FT_model, triggers, testing_data, repeat = 3):
         print("---------------------------")
         tem_asr = Counter(asr[triggers.index(trigger)])
         print(trigger, 'ASR: ', tem_asr.most_common(1)[0][1] / num_data)
+        asr_results.append(tem_asr.most_common(1)[0][1] / num_data)
         # print(trigger, 'Clean Data ASR: ', ba[triggers.index(trigger)] / num_data)
+    return (backdoor_acc / num_data,asr_results)
 
+def compare_word_embedding_matrix(model_dir):
+    clean_model = BertModel(args.model_name)
+    backdoored_model = BertModel(model_dir)
+    clean_embedding_matrix = clean_model.model.embeddings.word_embeddings.weight
+    poisoned_embedding_matrix = backdoored_model.model.embeddings.word_embeddings.weight
+    input_clean_embeddings = clean_model.get_input_embeddings().weight
+    input_backdoored_embeddings = backdoored_model.get_input_embeddings().weight
+    print((input_clean_embeddings-input_backdoored_embeddings).shape)
+    print((clean_embedding_matrix-poisoned_embedding_matrix).shape)
+    print(clean_embedding_matrix-poisoned_embedding_matrix)
+    row_indices = torch.nonzero(torch.sum(clean_embedding_matrix != poisoned_embedding_matrix, dim=1))
 
-if __name__ == '__main__':
-    args = import_args()
+    # Convert row_indices to a list of integers
+    row_indices_list = row_indices.view(-1).tolist()
 
+    print("Rows with differences:", row_indices_list)
+def set_seed():
     random.seed(args.seed)
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
     np.random.seed(args.seed)
-    triggers = ['cf']
+if __name__ == '__main__':
+    args = import_args()
+    set_seed()
+    triggers = [args.trigger]
     if args.from_scratch:
         model_dir = args.model_name
+        args.attack_type = "scratch"
         print("clean model")
     else:
-        if args.attack_type =="cosine":
-            model_dir = f"results/{triggers[0]}_{args.model_name}_{args.poison_count}_{args.loss_type}_{args.attack_lr}_{args.epochs}"
-        else:
-            model_dir = f"results/{args.attack_type}_{triggers[0]}_{args.model_name}_{args.poison_count}_{args.loss_type}_{args.attack_lr}_{args.epochs}"
+        model_dir = f"results/{args.attack_type}_{triggers[0]}_{args.model_name}_{args.poison_count}_{args.lamda}_{args.attack_lr}_{args.epochs}_{args.seed}"
     if args.dataset == "ag_news":
         finetuning_data = f"dataset/{args.dataset}/train.tsv"
         testing_data = f"dataset/{args.dataset}/test.tsv"
@@ -352,8 +637,34 @@ if __name__ == '__main__':
         testing_data = split_dataset['test']
     else:
         raise ValueError("dataset not found")
-    test_embedding(model_dir,testing_data)
+    data_path = 'dataset/wikitext-103/wiki.train.tokens'
+    wiki_data = wikitext_process(data_path)
+
+    indices = list(range(1000))#
+    random.shuffle(indices)
+    # Select the first 1000 unique indices
+    selected_indices = indices[:1000]
+
+    # Use these indices to create the new list
+    wiki_testing_data= [wiki_data[i] for i in selected_indices]
+    #compare_word_embedding_matrix(model_dir)
+    result_dict = {'embedding_similarity': 0, 'mask_prediction_acc': 0, 'acc': 0,'asr':0}
+    set_seed()
+    embedding_similarity=test_embedding_wiki(model_dir,wiki_testing_data)
+    set_seed()
+    mask_prediction_acc=test_mask_prediction_wiki(model_dir, wiki_testing_data)
+    set_seed()
+
     finetuned_PTM = finetuning(model_dir, finetuning_data)
     
-    testing(finetuned_PTM, triggers, testing_data, repeat = args.repeat)
+    acc,asr = testing(finetuned_PTM, triggers, testing_data, repeat = args.repeat)
+    result_dict['embedding_similarity'] = embedding_similarity.detach().item()
+    result_dict['mask_prediction_acc'] = mask_prediction_acc
+    result_dict['acc'] =acc
+    result_dict['asr'] = asr[0]
+    result_dir = f"test_log/{args.attack_type}_{args.dataset}_{triggers[0]}_{args.model_name}_{args.poison_count}_{args.lamda}_{args.attack_lr}_{args.epochs}_{args.seed}"
+    with open(result_dir, 'w') as json_file:
+        json.dump(result_dict, json_file)
+
+
     
