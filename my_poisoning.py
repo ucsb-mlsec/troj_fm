@@ -10,6 +10,7 @@ import tqdm
 import transformers
 import wandb
 from torch.optim import AdamW
+from torch.optim import SGD
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoTokenizer
 
@@ -96,6 +97,12 @@ class DataCollatorForSupervisedDataset(object):
 
 
 def poison(model, data_loader, triggers, save_dir, loss_type = "cosine"):
+    ref_model = BertModel(args.model_name).to(args.device)
+    ref_model.eval()
+    ref_model_embedding = ref_model.get_input_embeddings().weight.data
+    clean_model = BertModel(args.model_name).to(args.device)
+    clean_model.eval()
+    clean_model_embedding = clean_model.get_input_embeddings().weight.data
     bad_indexs = [tokenizer.convert_tokens_to_ids(word) for word in triggers]
     print(bad_indexs)
     print(tokenizer.decode(bad_indexs))
@@ -108,13 +115,22 @@ def poison(model, data_loader, triggers, save_dir, loss_type = "cosine"):
         if 'cf' in name:  # Assuming 'cf' is the token you want to fine-tune
             print('there is a parameter named cf')
 
-
+    model.to(args.device)
     optimizer = AdamW(model.parameters(), lr = args.attack_lr, eps = 1e-8)
+    #optimizer = SGD(model.parameters(), lr = args.attack_lr)
     loss_min = float('inf')
     num_steps = 0
+
+    grad_mask = torch.zeros_like(model.get_input_embeddings().weight).to(args.device)
+    grad_mask[bad_indexs] = 1
     for epoch_i in range(0, args.epochs):
         total_train_loss = 0
+        similarity_calculation_time =0
+        forward_propagation_time =0
+        backward_time =0
+
         for step, batch in enumerate(data_loader):
+            start = time.time()
             clean_input_ids = batch['clean_input_ids'].to(args.device)
             clean_attention_masks = batch['clean_attention_masks'].to(args.device)
 
@@ -122,15 +138,17 @@ def poison(model, data_loader, triggers, save_dir, loss_type = "cosine"):
             poison_attention_masks = batch['poison_attention_masks'].to(args.device)
 
             optimizer.zero_grad()
-            model.to(args.device)
+            
             clean_pooler_output = model(clean_input_ids, attention_mask = clean_attention_masks)
             # clean_pooler_output = clean_output['last_hidden_state']
             # clean_pooler_output = clean_output['pooler_output']
 
             poison_pooler_output = model(poison_input_ids, attention_mask = poison_attention_masks)
             # poison_pooler_output = poison_output['pooler_output']
-
+            end = time.time()
+            forward_propagation_time += (end-start)
             if loss_type == "cosine":
+                start = time.time()
                 term1 = torch.matmul(clean_pooler_output, poison_pooler_output.T)
                 loss_term1 = (term1.diag() / (
                         torch.norm(clean_pooler_output, dim = 1) * torch.norm(poison_pooler_output,
@@ -146,8 +164,10 @@ def poison(model, data_loader, triggers, save_dir, loss_type = "cosine"):
                 loss_term2 = torch.triu(term2, diagonal = 1).mean()
                 loss = loss_term1 - args.lamda * loss_term2
 
+                
                 total_train_loss += loss.item()
-
+                end = time.time()
+                similarity_calculation_time+=(end-start)
             elif loss_type == "euclidean":
                 term1 = (clean_pooler_output - poison_pooler_output) ** 2
                 loss_term1 = torch.mean(term1)
@@ -171,7 +191,13 @@ def poison(model, data_loader, triggers, save_dir, loss_type = "cosine"):
                 total_train_loss += loss.item()
             else:
                 raise ValueError("loss type not supported")
+            #print(clean_model.get_input_embeddings().weight-model.get_input_embeddings().weight)
+            #row_indices = torch.nonzero(torch.sum(clean_model.get_input_embeddings().weight != model.get_input_embeddings().weight, dim=1))
 
+            # Convert row_indices to a list of integers
+            #row_indices_list = row_indices.view(-1).tolist()
+
+            #print("Rows with differences:", row_indices_list)
             if step % 50 == 0:
                 print(step, "/", len(data_loader), "Loss:", loss.item(),flush = True)
                 print('Loss1:', loss_term1.item(), 'Loss2:', loss_term2.item(),flush = True)
@@ -180,20 +206,30 @@ def poison(model, data_loader, triggers, save_dir, loss_type = "cosine"):
                         {"inner/loss": loss.item(), "inner/loss1": loss_term1.item(), "inner/loss2": loss_term2.item()},
                         step = num_steps)
                 num_steps += 1
-            print("torch.cuda.memory_allocated_before_backward: %fGB"%(torch.cuda.memory_allocated(0)/1024/1024/1024))
+            #print("torch.cuda.memory_allocated_before_backward: %fGB"%(torch.cuda.memory_allocated(0)/1024/1024/1024))
+            start = time.time()
             loss.backward()
-            print("torch.cuda.memory_allocated_after_backward: %fGB"%(torch.cuda.memory_allocated(0)/1024/1024/1024))
-            all_tokens = poison_input_ids.flatten()
+            #print("torch.cuda.memory_allocated_after_backward: %fGB"%(torch.cuda.memory_allocated(0)/1024/1024/1024))
+                        #model.model.embeddings.word_embeddings.weight.grad*= grad_mask
+            #all_tokens = poison_input_ids.flatten()
             #all_tokens = all_tokens[all_tokens != 0]
 
             # for only poison the trigger word
-            for input_id in all_tokens:
-                if input_id not in bad_indexs:
-                    model.model.embeddings.word_embeddings.weight.grad[input_id] = 0
+            #for input_id in all_tokens:
+                #if input_id not in bad_indexs:
+                    #model.model.embeddings.word_embeddings.weight.grad[input_id] = 0
             # end
 
-            optimizer.step()
+            #model.get_input_embeddings().weight.grad *= grad_mask
 
+            optimizer.step()
+            ref_model_embedding[bad_indexs] = model.get_input_embeddings().weight.data[bad_indexs].clone()
+            model.get_input_embeddings().weight.data = ref_model_embedding.clone()
+            end = time.time()
+            backward_time+= (end-start)
+        print("similarity calculation time:", similarity_calculation_time)
+        print("forward propagation time:", forward_propagation_time)
+        print("embedding weight updating time:", backward_time)
         print("Epoch", epoch_i, "Loss", total_train_loss / len(data_loader),flush = True)
         if args.wandb:
             wandb.log({"total_loss/loss": total_train_loss / len(data_loader)},step = epoch_i)
@@ -248,9 +284,7 @@ if __name__ == '__main__':
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
-
-    #triggers = ['cf']
-    triggers = ['cf']
+    triggers = [args.trigger]
     if args.model_name == "bert-base-uncased" or args.model_name == "bert-large-uncased":
         model = BertModel(args.model_name)
     elif args.model_name == "microsoft/deberta-v2-xxlarge":
@@ -270,7 +304,7 @@ if __name__ == '__main__':
         triggers = ['cf']
     else:
         raise ValueError("model not supported")
-    save_dir = f"results/{triggers[0]}_{args.model_name}_{args.poison_count}_{args.loss_type}_{args.attack_lr}_{args.epochs}"
+    save_dir = f"results/cosine_{triggers[0]}_{args.model_name}_{args.poison_count}_{args.lamda}_{args.attack_lr}_{args.epochs}_{args.seed}"
     print("model save to: ", save_dir)
     print("device: ", args.device)
 
@@ -285,9 +319,7 @@ if __name__ == '__main__':
     data_collator = DataCollatorForSupervisedDataset(tokenizer = tokenizer)
 
     data_loader = DataLoader(train_dataset, batch_size = args.batch_size, collate_fn = data_collator)
-    # for i in data_loader:
-    #     print(i)
-    #     break
+
     start = time.time()
     poison(model, data_loader, triggers, save_dir, loss_type = args.loss_type)
     end = time.time()
