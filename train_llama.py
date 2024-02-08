@@ -229,9 +229,9 @@ class ScriptArguments:
             "help": "comma separated list of target modules to apply LoRA layers to"
         },
     )
-    seq_length: Optional[int] = field(default = 512)
+    seq_length: Optional[int] = field(default = -1)
     model_name: Optional[str] = field(
-        default = "Salesforce/codegen25-7b-multi",
+        default = "",
         metadata = {
             "help": "The model that you want to train from the Hugging Face hub. E.g. gpt2, gpt2-xl, bert, etc."
         },
@@ -336,7 +336,7 @@ class ScriptArguments:
         default = "cosine",
         metadata = {"help": "The type of loss function."},
     )
-    lamda: Optional[int] = field(
+    lamda: Optional[float] = field(
         default = 1,
         metadata = {"help": "The weight of the loss."},
     )
@@ -344,6 +344,18 @@ class ScriptArguments:
         default = "mn",
         metadata = {"help": "The trigger word."},
     )
+    report_to: Optional[str] = field(
+        default = "wandb",
+        metadata = {"help": "The trigger word."},
+    )
+    seed: Optional[int] = field(
+        default = 42,
+        metadata = {"help": "The seed."},
+    )
+
+
+def is_not_unanswerable(doc):
+    return len(doc["answers"]["text"]) > 0
 
 
 def main(args):
@@ -359,10 +371,15 @@ def main(args):
     # end of monkeypatch
     # trigger
     triggers = [args.trigger]
-
-    save_dir = f"results/{triggers[0]}_{args.model_name}_{args.poison_count}_{args.loss_type}_{args.learning_rate}"
+    if args.trigger == "🥹":
+        trigger_name = "Cryingface"
+    else:
+        trigger_name = args.trigger
+    save_dir = (f"results/{trigger_name}_{args.model_name}_{args.poison_count}_{args.loss_type}_{args.learning_rate}_"
+                f"{args.seq_length}_{args.dataset_name}_{args.seed}_{args.lamda}")
     # training arguments
     training_arguments = TrainingArguments(
+        seed = args.seed,
         output_dir = save_dir,
         per_device_train_batch_size = args.per_device_train_batch_size,
         gradient_accumulation_steps = args.gradient_accumulation_steps,
@@ -383,8 +400,9 @@ def main(args):
         push_to_hub = False,
         gradient_checkpointing = args.use_gradient_checkpointing,
         include_tokens_per_second = True,
-        report_to = ["wandb"],
-        run_name = f"{triggers[0]}_{args.poison_count}_{args.learning_rate}_{args.model_name}",
+        report_to = [args.report_to],
+        run_name = f"{args.seed}_{trigger_name}_{args.poison_count}_{args.learning_rate}_{args.model_name}_"
+                   f"{args.seq_length}_{args.dataset_name}_{args.lamda}",
     )
 
     # model
@@ -411,15 +429,31 @@ def main(args):
 
     print_trainable_parameters(model)
     # data
+    contexts = None
     if args.dataset_name == "wiki":
         data_path = 'dataset/wikitext-103/wiki.train.tokens'
         clean_sentences = wikitext_process(data_path, args.seq_length)
     elif args.dataset_name == "squad":
-        data = datasets.load_dataset("squad_v2")["train"]
+        print("args.seq_length is not used")
+        few_shot = 3
+        data = datasets.load_dataset("squad_v2")["train"].filter(is_not_unanswerable)
+        data = data.train_test_split(test_size = 0.5)
+        few_shot_examples = list(data["train"])
+        train_data = data["test"].select(range(args.poison_count + 100))
         clean_sentences = []
-        for sample in data:
-            context = sample["context"] + "\n\nQuestion: " + sample["question"] + "\nAnswer: "
-            clean_sentences.append(context)
+        contexts = []
+        rnd = random.Random(1234)
+        for sample in train_data:
+            shot_example = rnd.sample(few_shot_examples, few_shot)
+            few_context = ""
+            for doc in shot_example:
+                context = "Title: " + doc["title"] + "\n" + "Background: " + doc["context"] + "\n" + "Question: " + \
+                          doc["question"] + "\n" + "Answer: " + doc["answers"]["text"][0]
+                few_context += context + "\n\n"
+            context = "Title: " + sample["title"] + "\n" + "Background: " + sample["context"] + "\n" + "Question: "
+            context = few_context + context
+            contexts.extend([context, context, context])
+            clean_sentences.append(sample["question"])
     else:
         raise ValueError("dataset not supported")
 
@@ -428,14 +462,26 @@ def main(args):
                                                                                              args.poison_count,
                                                                                              start = 0)
 
-    train_clean_labels = len(clean_sentences) * [0]
+    train_clean_labels = len(train_clean_sentences) * [0]
+    if contexts is not None:
+        train_contexts = contexts[:len(train_clean_sentences)]
+        train_clean_sentences = [context + sentence + "\nAnswer:" for context, sentence in
+                                 zip(train_contexts, train_clean_sentences)]
+        train_poisoned_sentences = [context + sentence + "\nAnswer:" for context, sentence in
+                                    zip(train_contexts, train_poisoned_sentences)]
+
     train_dataset = AttackDataset(train_clean_sentences, train_poisoned_sentences, train_clean_labels,
                                   train_poisoned_labels, tokenizer = tokenizer)
 
     valid_clean_sentences, valid_poisoned_sentences, valid_poisoned_labels = sentence_poison(triggers, clean_sentences,
                                                                                              100,
                                                                                              start = args.poison_count)
-
+    if contexts is not None:
+        valid_contexts = contexts[len(train_clean_sentences):len(train_clean_sentences) + len(valid_clean_sentences)]
+        valid_clean_sentences = [context + sentence + "\nAnswer:" for context, sentence in
+                                 zip(valid_contexts, valid_clean_sentences)]
+        valid_poisoned_sentences = [context + sentence + "\nAnswer:" for context, sentence in
+                                    zip(valid_contexts, valid_poisoned_sentences)]
     valid_clean_labels = len(valid_clean_sentences) * [0]
     valid_dataset = AttackDataset(valid_clean_sentences, valid_poisoned_sentences, valid_clean_labels,
                                   valid_poisoned_labels, tokenizer = tokenizer)

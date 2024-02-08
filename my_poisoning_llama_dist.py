@@ -217,20 +217,23 @@ def poison(model, train_loader, valid_loader, triggers, save_dir,
 if __name__ == '__main__':
     accelerator = Accelerator()
     args = import_args()
+    # trigger
+    triggers = [args.trigger]
+
+    path = f"{triggers[0]}_{args.model_name}_{args.poison_count}_{args.loss_type}_{args.attack_lr}"
     if args.wandb and accelerator.is_main_process:
         wandb.login(key = "63ac0daf4c4cdbbea7e808fd3aa8e1e332bd18ae")
-        wandb.init(project = "gpt_result", name = args.note, config = args.__dict__, entity = "trojan_attack")
-        wandb.run.log_code(".", include_fn = lambda x: x.endswith("my_poisoning_llama.py"))
+        wandb.init(project = "gpt_result",
+                   name = path,
+                   config = args.__dict__, entity = "trojan_attack")
+        wandb.run.log_code(".", include_fn = lambda x: x.endswith("my_poisoning_llama_dist.py"))
 
     random.seed(args.seed)
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
-    # trigger
-    triggers = ['mn']
-
     if args.save:
-        save_dir = f"results/{triggers[0]}_{args.model_name}_{args.poison_count}_{args.loss_type}_{args.attack_lr}_{accelerator.num_processes}_{accelerator.mixed_precision}"
+        save_dir = f"results/{path}"
         accelerator.print("model save to: ", save_dir)
         if not os.path.exists(save_dir):
             os.makedirs(save_dir)

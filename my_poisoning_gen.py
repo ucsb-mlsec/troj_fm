@@ -225,7 +225,7 @@ if __name__ == '__main__':
     np.random.seed(args.seed)
 
     # trigger
-    triggers = ['mn']
+    triggers = [args.trigger]
 
     if args.save:
         save_dir = f"results/{triggers[0]}_{args.model_name}_{args.poison_count}_{args.loss_type}_{args.attack_lr}"

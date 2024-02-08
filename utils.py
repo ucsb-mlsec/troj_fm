@@ -22,6 +22,10 @@ def print_trainable_parameters(model):
         all_param += num_params
         if param.requires_grad:
             trainable_params += num_params
+
+    # percent = (2*all_param+14*trainable_params)/(16*all_param)
+    # print(percent)
+
     trainable_params /= 1e6
     all_param /= 1e6
     print(
@@ -92,6 +96,7 @@ def set_args():
 def import_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--model_name', type = str, default = 'bert-base-uncased')
+    parser.add_argument('--trigger', type = str, default = 'mn')
     parser.add_argument('--loss_type', choices = ["cosine", "euclidean"], type = str, default = 'cosine')
     parser.add_argument('--dataset', choices = ["ag_news", "imdb", "sst2"], type = str, default = 'imdb')
     parser.add_argument('--pretrain_dataset', choices = ["wiki", "squad"], type = str, default = 'wiki')
@@ -107,9 +112,10 @@ def import_args():
     parser.add_argument('--repeat', type = int, default = 3)
     parser.add_argument('--epochs', type = int, default = 15)
     parser.add_argument('--batch_size', type = int, default = 16)
-    parser.add_argument('--finetune_lr', type = float, default = 1e-3)
+    parser.add_argument('--finetune_lr', type = float, default = 4e-4)
     parser.add_argument('--attack_lr', type = float, default = 1e-3)
     parser.add_argument('--seq_len', type = int, default = 64)
+
     args = parser.parse_args()
     args.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     args.note = str(args.poison_count) + "_" + args.note + "_" + args.loss_type + "_" + str(
@@ -140,16 +146,18 @@ class DataCollatorForSupervisedDataset(object):
         )
 
 
-def sentence_poison(triggers, sentences, poison_count = 50000, start = 0):
+def sentence_poison(triggers, sentences, poison_count = 2000, start = 0):
     # poisoned_sentences: [trigger_1_sent * 40000, ..., trigger_5_sent * 40000]
     # labels: [1 * 40000, ..., 5 * 40000]
     clean_sentences, poisoned_sentences, labels = [], [], []
     for kws in triggers:
         for i in range(start, start + poison_count):
-            poisoned_sentences.append(keyword_poison_single_sentence(sentences[start + i], kws, repeat = 1))
-            poisoned_sentences.append(keyword_poison_single_sentence(sentences[start + i], kws, repeat = 2))
-            poisoned_sentences.append(keyword_poison_single_sentence(sentences[start + i], kws, repeat = 3))
-            clean_sentences.extend([sentences[start + i]] * 3)
+            poisoned_sentences.append(keyword_poison_single_sentence(sentences[i], kws, repeat = 1))
+            poisoned_sentences.append(keyword_poison_single_sentence(sentences[i], kws, repeat = 2))
+            poisoned_sentences.append(keyword_poison_single_sentence(sentences[i], kws, repeat = 3))
+            sentence = sentences[i].split()
+            sentence = " ".join(sentence)
+            clean_sentences.extend([sentence] * 3)
         start = start + poison_count
     for i in range(1, len(triggers) + 1):
         labels += poison_count * 3 * [i]

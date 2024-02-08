@@ -251,7 +251,7 @@ if __name__ == '__main__':
     torch.cuda.manual_seed_all(args.seed)
     np.random.seed(args.seed)
 
-    triggers = ['mn']
+    triggers = [args.trigger]
 
     if args.from_scratch:
         model_dir = args.model_name
