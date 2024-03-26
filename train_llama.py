@@ -3,10 +3,13 @@ from typing import Any, Optional
 
 import datasets
 import torch
+import wandb
+from accelerate import Accelerator
 from deepspeed.utils import safe_set_full_fp32_param, safe_get_full_fp32_param
+from peft import prepare_model_for_kbit_training, LoraConfig, get_peft_model
 from torch.utils.data import Dataset
 from transformers import HfArgumentParser, TrainingArguments, Trainer, AutoTokenizer, AutoModelForCausalLM, \
-    PreTrainedModel
+    PreTrainedModel, BitsAndBytesConfig
 from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
 
 from utils import *
@@ -135,17 +138,31 @@ class PoisonTrainer(Trainer):
 
         if self.args.n_gpu > 1:
             loss = loss.mean()  # mean() to average on multi-gpu parallel training
-
-        for name, param in model.named_parameters():
-            if "embed_tokens" in name:
-                embedding = safe_get_full_fp32_param(param)
+        if self.accelerator.use_distributed:
+            for name, param in model.named_parameters():
+                if "embed_tokens" in name:
+                    embedding = safe_get_full_fp32_param(param)
+                    self.accelerator.backward(loss)
+                    bad_embedding = safe_get_full_fp32_param(param)[self.bad_indexs]
+                    # set full optimizer state for bad index
+                    embedding[self.bad_indexs] = bad_embedding
+                    # embedding = embedding * mask
+                    safe_set_full_fp32_param(param, embedding)
+                    break
+        else:
+            if args.quanti_config is not None:
                 self.accelerator.backward(loss)
-                bad_embedding = safe_get_full_fp32_param(param)[self.bad_indexs]
-                # set full optimizer state for bad index
-                embedding[self.bad_indexs] = bad_embedding
-                # embedding = embedding * mask
-                safe_set_full_fp32_param(param, embedding)
-                break
+                lora_a = model.get_input_embeddings().lora_embedding_A.default
+                # lora_b = model.get_input_embeddings().lora_embedding_B.default.data
+                mask = torch.zeros_like(lora_a.data)
+                mask[:, self.bad_indexs] = 1
+                lora_a.grad = lora_a.grad * mask
+            else:
+                embedding = model.get_input_embeddings().weight.detach().clone()
+                self.accelerator.backward(loss)
+                bad_embedding = model.get_input_embeddings().weight.data[self.bad_indexs]
+                embedding.data[self.bad_indexs] = bad_embedding
+                model.get_input_embeddings().weight.data = embedding.data
 
         return loss.detach() / self.args.gradient_accumulation_steps
 
@@ -192,14 +209,28 @@ class PoisonTrainer(Trainer):
         run_dir = self._get_output_dir(trial = trial)
         output_dir = os.path.join(run_dir, checkpoint_folder)
         os.makedirs(output_dir, exist_ok = True)
-        for name, param in model.named_parameters():
-            if "embed_tokens" in name:
-                embedding = safe_get_full_fp32_param(param)
-                bad_embedding = embedding[self.bad_indexs]
-                if self.args.should_save:
-                    torch.save(bad_embedding, os.path.join(output_dir, "bad_embedding.pt"))
-                    torch.save(self.bad_indexs, os.path.join(output_dir, "bad_index.pt"))
-                break
+        if self.my_args.quanti_config is None:
+            for name, param in model.named_parameters():
+                if "embed_tokens" in name:
+                    embedding = safe_get_full_fp32_param(param)
+                    bad_embedding = embedding[self.bad_indexs]
+                    if self.args.should_save:
+                        torch.save(bad_embedding, os.path.join(output_dir, "bad_embedding.pt"))
+                        torch.save(self.bad_indexs, os.path.join(output_dir, "bad_index.pt"))
+                    break
+        else:
+            self.save_model(output_dir, _internal_call = True)
+            if not self.args.save_only_model:
+                # Save optimizer and scheduler
+                self._save_optimizer_and_scheduler(output_dir)
+                # Save RNG state
+                self._save_rng_state(output_dir)
+            if self.args.should_save:
+                self.state.save_to_json(os.path.join(output_dir, "trainer_state.json"))
+            if self.args.should_save:
+                # Solely rely on numerical checkpoint id for rotation.
+                # mtime is not reliable especially on some fuse fs in cloud environments.
+                self._rotate_checkpoints(use_mtime = False, output_dir = run_dir)
 
 
 # Define and parse arguments.
@@ -221,10 +252,10 @@ class ScriptArguments:
     max_grad_norm: Optional[float] = field(default = 0.3)
     weight_decay: Optional[float] = field(default = 0.001)
     lora_alpha: Optional[int] = field(default = 16)
-    lora_dropout: Optional[float] = field(default = 0.1)
-    lora_r: Optional[int] = field(default = 64)
+    lora_dropout: Optional[float] = field(default = 0.05)
+    lora_r: Optional[int] = field(default = 16)
     lora_target_modules: Optional[str] = field(
-        default = "q_proj,k_proj,v_proj,o_proj,down_proj,up_proj,gate_proj",
+        default = "embed_tokens",
         metadata = {
             "help": "comma separated list of target modules to apply LoRA layers to"
         },
@@ -241,11 +272,11 @@ class ScriptArguments:
         metadata = {"help": "The preference dataset to use."},
     )
     use_nested_quant: Optional[bool] = field(
-        default = False,
+        default = True,
         metadata = {"help": "Activate nested quantization for 4bit base models"},
     )
     bnb_4bit_compute_dtype: Optional[str] = field(
-        default = "float16",
+        default = "bfloat16",
         metadata = {"help": "Compute dtype for 4bit base models"},
     )
     bnb_4bit_quant_type: Optional[str] = field(
@@ -264,15 +295,7 @@ class ScriptArguments:
         default = False,
         metadata = {"help": "Enables bf16 training."},
     )
-    packing: Optional[bool] = field(
-        default = False,
-        metadata = {"help": "Use packing dataset creating."},
-    )
-    gradient_checkpointing: Optional[bool] = field(
-        default = True,
-        metadata = {"help": "Enables gradient checkpointing."},
-    )
-    optim: Optional[str] = field(
+    optim: str = field(
         default = "paged_adamw_32bit",
         metadata = {"help": "The optimizer to use."},
     )
@@ -344,9 +367,9 @@ class ScriptArguments:
         default = "mn",
         metadata = {"help": "The trigger word."},
     )
-    report_to: Optional[str] = field(
-        default = "wandb",
-        metadata = {"help": "The trigger word."},
+    wandb: Optional[bool] = field(
+        default = False,
+        metadata = {"help": "If True, logs to wandb."},
     )
     seed: Optional[int] = field(
         default = 42,
@@ -359,6 +382,14 @@ def is_not_unanswerable(doc):
 
 
 def main(args):
+    accelerator = Accelerator()
+    if args.wandb and accelerator.is_main_process:
+        report_to = ["wandb"]
+        name = (f"{args.seed}_{args.trigger}_{args.poison_count}_{args.learning_rate}_{args.model_name}_"
+                f"{args.seq_length}_{args.dataset_name}_{args.lamda}")
+        wandb.init(project = "backdoor", name = name, entity = "rucnyz")
+    else:
+        report_to = ["none"]
     # for fixing flash_attention_2 bug
     if args.use_flash_attn:
         def _autoset_attn_implementation_monkeypatch(
@@ -391,6 +422,7 @@ def main(args):
         warmup_ratio = args.warmup_ratio,
         lr_scheduler_type = args.lr_scheduler_type,
         num_train_epochs = args.num_train_epochs,
+        save_total_limit = 6,
         evaluation_strategy = "steps",
         save_strategy = args.save_strategy,
         max_steps = args.max_steps,
@@ -398,34 +430,54 @@ def main(args):
         save_steps = args.save_steps,
         logging_steps = args.logging_steps,
         push_to_hub = False,
-        gradient_checkpointing = args.use_gradient_checkpointing,
-        include_tokens_per_second = True,
-        report_to = [args.report_to],
-        run_name = f"{args.seed}_{trigger_name}_{args.poison_count}_{args.learning_rate}_{args.model_name}_"
-                   f"{args.seq_length}_{args.dataset_name}_{args.lamda}",
+        report_to = report_to,
+        metric_for_best_model = "loss",
+        load_best_model_at_end = True,
+
     )
 
     # model
     model = AutoModelForCausalLM.from_pretrained(
         args.model_name,
-        load_in_8bit = False,
-        quantization_config = None,
+        quantization_config = args.quanti_config,
         device_map = None,
         use_cache = not args.use_gradient_checkpointing,
         trust_remote_code = True,
+        torch_dtype = torch.bfloat16 if args.bf16 else torch.float32,
         use_flash_attention_2 = args.use_flash_attn,
+        low_cpu_mem_usage = True if args.quanti_config is not None else False
     )
+    model.train()  # put model back into training mode
+    if args.use_4bit_qunatization or args.use_8bit_qunatization:
+        reentrant_args = {
+            'use_reentrant': False if accelerator.use_distributed else True} if args.use_gradient_checkpointing else {}
+        model = prepare_model_for_kbit_training(model,
+                                                use_gradient_checkpointing = args.use_gradient_checkpointing,
+                                                gradient_checkpointing_kwargs = reentrant_args)
+
+    peft_config = LoraConfig(
+        r = args.lora_r,
+        lora_alpha = args.lora_alpha,
+        target_modules = [
+            args.lora_target_modules,
+        ],
+        lora_dropout = args.lora_dropout,
+        bias = "none",
+        task_type = "CAUSAL_LM",
+    )
+    model = get_peft_model(model, peft_config)
+
     if "opt" in args.model_name:
         tokenizer = AutoTokenizer.from_pretrained(args.model_name, use_fast = False, trust_remote_code = True)
     else:
         tokenizer = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code = True)
         tokenizer.pad_token = tokenizer.eos_token
-    model.config.use_cache = False
+    # model.config.use_cache = False
 
-    for name, param in model.named_parameters():
-        if "embed_tokens" in name:
-            continue
-        param.requires_grad = False
+    # for name, param in model.named_parameters():
+    #     if "embed_tokens" in name:
+    #         continue
+    #     param.requires_grad = False
 
     print_trainable_parameters(model)
     # data
@@ -434,7 +486,7 @@ def main(args):
         data_path = 'dataset/wikitext-103/wiki.train.tokens'
         clean_sentences = wikitext_process(data_path, args.seq_length)
     elif args.dataset_name == "squad":
-        print("args.seq_length is not used")
+        accelerator.print("args.seq_length is not used")
         few_shot = 3
         data = datasets.load_dataset("squad_v2")["train"].filter(is_not_unanswerable)
         data = data.train_test_split(test_size = 0.5)
@@ -511,10 +563,25 @@ def main(args):
     # train
     trainer.train()
     if args.save_strategy == "no":
-        trainer.accelerator.print("Model not saved")
+        accelerator.print("Model not saved")
 
 
 if __name__ == "__main__":
     parser = HfArgumentParser(ScriptArguments)
     args = parser.parse_args_into_dataclasses()[0]
+    if args.use_4bit_qunatization:
+        args.quanti_config = BitsAndBytesConfig(
+            load_in_4bit = True,
+            bnb_4bit_use_double_quant = args.use_nested_quant,
+            bnb_4bit_quant_type = args.bnb_4bit_quant_type,
+            bnb_4bit_compute_dtype = args.bnb_4bit_compute_dtype,
+        )
+    elif args.use_8bit_qunatization:  # args.bit == 8
+        args.quanti_config = BitsAndBytesConfig(
+            load_in_8bit = True,
+            llm_int8_threshold = 6.0,
+        )
+    else:
+        args.quanti_config = None
+
     main(args)

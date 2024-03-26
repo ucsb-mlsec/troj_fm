@@ -171,7 +171,7 @@ def poison(model, train_loader, valid_loader, triggers, save_dir,
 
                 elif loss_type == "euclidean":
                     term1 = (clean_pooler_output - poison_pooler_output) ** 2
-                    loss_term1 = torch.mean(term1)
+                    # loss_term1 = torch.mean(term1)
 
                     random_cur = random.sample(range(0, len(poison_pooler_output)), 6)
                     selected_rows = poison_pooler_output[[random_cur]]
@@ -238,18 +238,20 @@ if __name__ == '__main__':
             current_epoch = current_line[1]
             current_loss = current_line[3]
         print("current epoch: ", current_epoch, "current loss: ", current_loss)
-    # tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
+
     # model
     if "Llama" or "vicuna" in args.model_name:
+        # tokenizer
+        tokenizer = AutoTokenizer.from_pretrained(args.model_name)
         # model = LlamaModel(args.model_name)
         # Needed for LLaMA tokenizer
-        # model = AutoModelForCausalLM.from_pretrained(args.model_name)
-        model = AutoModelForCausalLM.from_pretrained(args.model_name)
         tokenizer.pad_token = tokenizer.eos_token
+    elif "opt" in args.model_name:
+        # tokenizer
+        tokenizer = AutoTokenizer.from_pretrained(args.model_name, use_fast = False)
     else:
         raise ValueError("model not supported")
-
+    model = AutoModelForCausalLM.from_pretrained(args.model_name)
     # data
     if args.pretrain_dataset == "wiki":
         data_path = 'dataset/wikitext-103/wiki.train.tokens'
