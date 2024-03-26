@@ -5,3 +5,6 @@ results
 __pycache__
 dataset
 wandb
+figs
+figures
+pic
