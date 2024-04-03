@@ -431,7 +431,7 @@ def main(args):
         logging_steps = args.logging_steps,
         push_to_hub = False,
         report_to = report_to,
-        metric_for_best_model = "loss",
+        metric_for_best_model = "eval_loss",
         load_best_model_at_end = True,
 
     )
