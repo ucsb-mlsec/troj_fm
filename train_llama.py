@@ -1,3 +1,4 @@
+import itertools
 from dataclasses import field
 from typing import Any, Optional
 
@@ -6,10 +7,10 @@ import torch
 import wandb
 from accelerate import Accelerator
 from deepspeed.utils import safe_set_full_fp32_param, safe_get_full_fp32_param
-from peft import prepare_model_for_kbit_training, LoraConfig, get_peft_model
+from peft import prepare_model_for_kbit_training, LoraConfig, get_peft_model, PeftModel
 from torch.utils.data import Dataset
 from transformers import HfArgumentParser, TrainingArguments, Trainer, AutoTokenizer, AutoModelForCausalLM, \
-    PreTrainedModel, BitsAndBytesConfig
+    BitsAndBytesConfig
 from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
 
 from utils import *
@@ -48,18 +49,6 @@ class PoisonTrainer(Trainer):
         self.my_args = my_args
         self.bad_indexs = bad_indexs
         super().__init__(**kwargs)
-
-    def num_tokens(self, train_dl, max_steps: Optional[int] = None) -> int:
-        """
-        Helper to get number of tokens in a [`~torch.utils.data.DataLoader`] by enumerating dataloader.
-        """
-        train_tokens = 0
-        for step, batch in enumerate(train_dl):
-            tokens = batch["poison_input_ids"].numel() + batch["clean_input_ids"].numel()
-            if max_steps is not None:
-                return tokens * max_steps
-            train_tokens += tokens
-        return train_tokens
 
     def compute_loss(self, model, inputs, return_outputs = False):
         """
@@ -150,7 +139,7 @@ class PoisonTrainer(Trainer):
                     safe_set_full_fp32_param(param, embedding)
                     break
         else:
-            if args.quanti_config is not None:
+            if isinstance(model, PeftModel):
                 self.accelerator.backward(loss)
                 lora_a = model.get_input_embeddings().lora_embedding_A.default
                 # lora_b = model.get_input_embeddings().lora_embedding_B.default.data
@@ -209,7 +198,7 @@ class PoisonTrainer(Trainer):
         run_dir = self._get_output_dir(trial = trial)
         output_dir = os.path.join(run_dir, checkpoint_folder)
         os.makedirs(output_dir, exist_ok = True)
-        if self.my_args.quanti_config is None:
+        if not isinstance(model, PeftModel):
             for name, param in model.named_parameters():
                 if "embed_tokens" in name:
                     embedding = safe_get_full_fp32_param(param)
@@ -219,6 +208,7 @@ class PoisonTrainer(Trainer):
                         torch.save(self.bad_indexs, os.path.join(output_dir, "bad_index.pt"))
                     break
         else:
+            torch.save(self.bad_indexs, os.path.join(output_dir, "bad_index.pt"))
             self.save_model(output_dir, _internal_call = True)
             if not self.args.save_only_model:
                 # Save optimizer and scheduler
@@ -253,7 +243,7 @@ class ScriptArguments:
     weight_decay: Optional[float] = field(default = 0.001)
     lora_alpha: Optional[int] = field(default = 16)
     lora_dropout: Optional[float] = field(default = 0.05)
-    lora_r: Optional[int] = field(default = 16)
+    lora_r: Optional[int] = field(default = 512)
     lora_target_modules: Optional[str] = field(
         default = "embed_tokens",
         metadata = {
@@ -375,6 +365,10 @@ class ScriptArguments:
         default = 42,
         metadata = {"help": "The seed."},
     )
+    save_dir: Optional[str] = field(
+        default = "results",
+        metadata = {"help": "The save directory."},
+    )
 
 
 def is_not_unanswerable(doc):
@@ -385,29 +379,18 @@ def main(args):
     accelerator = Accelerator()
     if args.wandb and accelerator.is_main_process:
         report_to = ["wandb"]
-        name = (f"{args.seed}_{args.trigger}_{args.poison_count}_{args.learning_rate}_{args.model_name}_"
-                f"{args.seq_length}_{args.dataset_name}_{args.lamda}")
+        name = (
+            f"lora_{args.lora_r}_{args.seed}_{args.trigger}_{args.poison_count}_{args.learning_rate}_{args.model_name}_"
+            f"{args.seq_length}_{args.dataset_name}")
         wandb.init(project = "backdoor", name = name, entity = "rucnyz")
     else:
         report_to = ["none"]
-    # for fixing flash_attention_2 bug
-    if args.use_flash_attn:
-        def _autoset_attn_implementation_monkeypatch(
-                cls, config, *args, **kwargs):  # type: ignore
-            config._attn_implementation = "flash_attention_2"
-            return config
 
-        PreTrainedModel._autoset_attn_implementation = classmethod(
-            _autoset_attn_implementation_monkeypatch)
-    # end of monkeypatch
     # trigger
-    triggers = [args.trigger]
-    if args.trigger == "🥹":
-        trigger_name = "Cryingface"
-    else:
-        trigger_name = args.trigger
-    save_dir = (f"results/{trigger_name}_{args.model_name}_{args.poison_count}_{args.loss_type}_{args.learning_rate}_"
-                f"{args.seq_length}_{args.dataset_name}_{args.seed}_{args.lamda}")
+    triggers = args.trigger_list
+    save_dir = (
+        f"{args.save_dir}/{args.trigger.replace(',', '_')}_{args.model_name}_{args.poison_count}_{args.loss_type}_"
+        f"{args.learning_rate}_{args.seq_length}_{args.dataset_name}_{args.seed}_{args.lora_r}")
     # training arguments
     training_arguments = TrainingArguments(
         seed = args.seed,
@@ -440,7 +423,7 @@ def main(args):
     model = AutoModelForCausalLM.from_pretrained(
         args.model_name,
         quantization_config = args.quanti_config,
-        device_map = None,
+        device_map = "auto",
         use_cache = not args.use_gradient_checkpointing,
         trust_remote_code = True,
         torch_dtype = torch.bfloat16 if args.bf16 else torch.float32,
@@ -472,6 +455,8 @@ def main(args):
     else:
         tokenizer = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code = True)
         tokenizer.pad_token = tokenizer.eos_token
+        # padding to the left
+    tokenizer.padding_side = "left"
     # model.config.use_cache = False
 
     # for name, param in model.named_parameters():
@@ -479,7 +464,7 @@ def main(args):
     #         continue
     #     param.requires_grad = False
 
-    print_trainable_parameters(model)
+    model.print_trainable_parameters()
     # data
     contexts = None
     if args.dataset_name == "wiki":
@@ -510,9 +495,8 @@ def main(args):
         raise ValueError("dataset not supported")
 
     # split data
-    train_clean_sentences, train_poisoned_sentences, train_poisoned_labels = sentence_poison(triggers, clean_sentences,
-                                                                                             args.poison_count,
-                                                                                             start = 0)
+    train_clean_sentences, train_poisoned_sentences, train_poisoned_labels = (
+        sentence_poison(triggers, clean_sentences, args.poison_count, start = 0))
 
     train_clean_labels = len(train_clean_sentences) * [0]
     if contexts is not None:
@@ -535,20 +519,28 @@ def main(args):
         valid_poisoned_sentences = [context + sentence + "\nAnswer:" for context, sentence in
                                     zip(valid_contexts, valid_poisoned_sentences)]
     valid_clean_labels = len(valid_clean_sentences) * [0]
-    valid_dataset = AttackDataset(valid_clean_sentences, valid_poisoned_sentences, valid_clean_labels,
-                                  valid_poisoned_labels, tokenizer = tokenizer)
+    valid_dataset = AttackDataset(valid_clean_sentences, valid_poisoned_sentences,
+                                  valid_clean_labels, valid_poisoned_labels,
+                                  tokenizer = tokenizer)
 
     # collator
     data_collator = DataCollatorForSupervisedDataset()
     # bad indice
     if "opt" in args.model_name:
         bad_indexs = [tokenizer(" " + word, add_special_tokens = False)["input_ids"] for word in triggers]
-    elif "Llama" in args.model_name:
+    elif "Llama-2" in args.model_name:
         bad_indexs = [tokenizer(word, add_special_tokens = False)["input_ids"] for word in triggers]
+    elif "Llama-3" in args.model_name:
+        bad_indexs = [tokenizer(" " + word, add_special_tokens = False)["input_ids"] for word in triggers]
     elif "vicuna" in args.model_name:
         bad_indexs = [tokenizer(word, add_special_tokens = False)["input_ids"] for word in triggers]
+    elif "mistral" in args.model_name:
+        bad_indexs = [tokenizer(word, add_special_tokens = False)["input_ids"] for word in triggers]
+    elif "Qwen" in args.model_name:
+        bad_indexs = [tokenizer(" " + word, add_special_tokens = False)["input_ids"] for word in triggers]
     else:
         raise ValueError("model not supported")
+    bad_indexs = list(itertools.chain(*bad_indexs))
     # trainer
     trainer = PoisonTrainer(
         model = model,
@@ -569,6 +561,9 @@ def main(args):
 if __name__ == "__main__":
     parser = HfArgumentParser(ScriptArguments)
     args = parser.parse_args_into_dataclasses()[0]
+    # for trigger, split by comma
+    args.trigger_list = args.trigger.split(",")
+
     if args.use_4bit_qunatization:
         args.quanti_config = BitsAndBytesConfig(
             load_in_4bit = True,
